@@ -1,0 +1,24 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <name>decomp_ros_msgs</name>
+  <version>0.0.0</version>
+  <description>The decomp_ros_msgs package</description>
+
+  <maintainer email="sikang@seas.upenn.edu">sikang</maintainer>
+
+  <license>TODO</license>
+
+  <!-- 构建系统 -->
+  <buildtool_depend>ament_cmake</buildtool_depend>
+
+  <!-- 原始依赖 -->
+  <depend>geometry_msgs</depend>
+
+  <!-- ROS 2 消息生成依赖 -->
+  <build_depend>rosidl_default_generators</build_depend>
+  <exec_depend>rosidl_default_runtime</exec_depend>
+
+  <!-- 标记为接口包 -->
+  <member_of_group>rosidl_interface_packages</member_of_group>
+</package>

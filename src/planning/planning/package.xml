@@ -1,0 +1,39 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <name>planning</name>
+  <version>0.0.0</version>
+  <description>The planning package</description>
+
+  <maintainer email="jlji@zju.edu.cn">ji</maintainer>
+
+  <license>GPLv3</license>
+
+  <buildtool_depend>ament_cmake</buildtool_depend>
+
+  <!-- ROS 2 Core Dependencies -->
+  <depend>rclcpp</depend>
+  <depend>rclcpp_components</depend>
+  <depend>std_msgs</depend>
+  <depend>geometry_msgs</depend>
+  <depend>nav_msgs</depend>
+  <depend>sensor_msgs</depend>
+  <depend>visualization_msgs</depend>
+  <depend>pcl_conversions</depend>
+  <depend>ament_index_cpp</depend>
+
+  <!-- Custom Dependencies -->
+  <depend>quadrotor_msgs</depend>
+  <depend>mapping</depend>
+  <depend>traj_opt</depend>
+  <depend>decomp_ros_utils</depend>
+  
+  <!-- System Dependencies -->
+  <depend>eigen3_cmake_module</depend> <!-- Recommended for finding Eigen3 in ROS 2 -->
+  <depend>eigen</depend>
+
+  <export>
+    <build_type>ament_cmake</build_type>
+  </export>
+
+</package>

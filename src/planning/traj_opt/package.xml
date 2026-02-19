@@ -1,0 +1,21 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <name>traj_opt</name>
+  <version>0.0.0</version>
+  <description>The traj_opt package</description>
+
+  <maintainer email="jlji@zju.edu.cn">ji</maintainer>
+
+  <license>GPLv3</license>
+
+  <!-- 构建工具 -->
+  <buildtool_depend>ament_cmake</buildtool_depend>
+
+  <!-- 依赖项 -->
+  <depend>rclcpp</depend>
+  
+  <!-- Eigen 通常是系统依赖 -->
+  <depend>libeigen-dev</depend> 
+
+</package>
