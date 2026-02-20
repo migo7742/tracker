@@ -10,7 +10,7 @@
   <buildtool_depend>ament_cmake</buildtool_depend>
 
   <depend>rclcpp</depend>
-  <depend>object_detection_msgs</depend>
+  <depend>vision_msgs</depend>
   <depend>message_filters</depend>
   <depend>nav_msgs</depend>
   <depend>libeigen-dev</depend> <!-- ROS2 中通常使用系统 Eigen -->

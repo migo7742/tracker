@@ -162,7 +162,7 @@ void OccGridMap::occ2pc(sensor_msgs::msg::PointCloud2& msg) {
   pcd.height = 1;
   pcd.is_dense = true;
   pcl::toROSMsg(pcd, msg);
-  msg.header.frame_id = "world";
+  msg.header.frame_id = "odom";
   // 注意：调用者需要设置 stamp
 }
 
@@ -188,7 +188,7 @@ void OccGridMap::occ2pc(sensor_msgs::msg::PointCloud2& msg, double floor, double
   pcd.height = 1;
   pcd.is_dense = true;
   pcl::toROSMsg(pcd, msg);
-  msg.header.frame_id = "world";
+  msg.header.frame_id = "odom";
 }
 
 void OccGridMap::inflate_once() {

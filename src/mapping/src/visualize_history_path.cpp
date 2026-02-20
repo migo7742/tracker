@@ -42,7 +42,7 @@ private:
   rclcpp::Time t_last_;
 
   void target_odom_callback(const nav_msgs::msg::Odometry::ConstSharedPtr msg) {
-    target_path.header.frame_id = "world";
+    target_path.header.frame_id = "odom";
     target_path.header.stamp = this->now();
     geometry_msgs::msg::PoseStamped pose;
     pose.pose.position.x = msg->pose.pose.position.x;
@@ -80,7 +80,7 @@ private:
       Eigen::Vector3d dz = dx.cross(dy);
 
       nav_msgs::msg::Path spring_msg;
-      spring_msg.header.frame_id = "world";
+      spring_msg.header.frame_id = "odom";
       spring_msg.header.stamp = this->now();
       
       for (double t = 0; t < 10 * 2 * M_PI; t += 0.1) {
@@ -103,7 +103,7 @@ private:
     t_last_ = t_now;
     
     line_list.header.stamp = t_now;
-    line_list.header.frame_id = "world";
+    line_list.header.frame_id = "odom";
     line_list.action = visualization_msgs::msg::Marker::ADD;
     line_list.ns = "lines";
     line_list.id = 0; // Set ID
@@ -129,7 +129,7 @@ private:
   }
 
   void cmd_callback(const quadrotor_msgs::msg::PositionCommand::ConstSharedPtr cmd) {
-    drone_path.header.frame_id = "world";
+    drone_path.header.frame_id = "odom";
     drone_path.header.stamp = this->now();
     geometry_msgs::msg::PoseStamped pose;
     pose.pose.position.x = cmd->position.x;

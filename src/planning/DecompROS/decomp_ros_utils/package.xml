@@ -3,7 +3,7 @@
 <package format="3">
   <name>decomp_ros_utils</name>
   <version>0.0.0</version>
-  <description>The decomp_ros_utils package</description>
+  <description>The decomp_ros_utils package (header-only utilities for DecompROS)</description>
 
   <maintainer email="sikang@todo.todo">sikang</maintainer>
 
@@ -12,14 +12,9 @@
   <buildtool_depend>ament_cmake</buildtool_depend>
 
   <depend>rclcpp</depend>
-  <depend>rviz_common</depend>
-  <depend>rviz_rendering</depend>
   <depend>decomp_ros_msgs</depend>
-  <depend>libqt5-widgets</depend> <!-- 显式声明 Qt 依赖是一个好习惯 -->
+  <depend>sensor_msgs</depend>
+  <depend>nav_msgs</depend>
+  <depend>geometry_msgs</depend>
 
-  <!-- 
-    注意：在 ROS 2 中，pluginlib 的导出不再写在 <export> 里，
-    而是通过 CMake 中的 pluginlib_export_plugin_description_file 处理。
-    这里只需要标准的 package.xml 内容。
-  -->
 </package>

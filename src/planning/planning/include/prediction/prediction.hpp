@@ -31,7 +31,6 @@ class Predict {
  private:
   static constexpr int MAX_MEMORY = 1 << 22;
   
-  // ROS 2 Node Shared Pointer
   rclcpp::Node::SharedPtr nh_;
 
   double dt;
@@ -39,6 +38,7 @@ class Predict {
   double rho_a;
   double car_z, vmax;
   mapping::OccGridMap map;
+  std::unique_ptr<Node[]> pool_;
   NodePtr data[MAX_MEMORY];
   int stack_top;
 
@@ -47,9 +47,7 @@ class Predict {
   }
 
  public:
-  // Constructor adapted for ROS 2
   inline Predict(rclcpp::Node::SharedPtr nh) : nh_(nh) {
-    // Parameter handling helper
     auto declare_and_get = [&](const std::string& name, double& var, double default_val) {
         if (!nh_->has_parameter(name)) {
             nh_->declare_parameter(name, default_val);
@@ -57,21 +55,14 @@ class Predict {
         nh_->get_parameter(name, var);
     };
 
-    // Declare and get parameters with default values
     declare_and_get("tracking_dur", pre_dur, 1.0);
     declare_and_get("tracking_dt", dt, 0.1);
     declare_and_get("prediction/rho_a", rho_a, 1.0);
     declare_and_get("prediction/vmax", vmax, 2.0);
 
+    pool_ = std::make_unique<Node[]>(MAX_MEMORY);
     for (int i = 0; i < MAX_MEMORY; ++i) {
-      data[i] = new Node;
-    }
-  }
-
-  // Added destructor to prevent memory leak
-  inline ~Predict() {
-    for (int i = 0; i < MAX_MEMORY; ++i) {
-      delete data[i];
+      data[i] = &pool_[i];
     }
   }
 

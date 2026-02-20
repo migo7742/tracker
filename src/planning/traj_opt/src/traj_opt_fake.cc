@@ -198,7 +198,7 @@ bool TrajOpt::generate_traj(const Eigen::MatrixXd& iniState,
     cfgHs_.push_back(cfgHs_[0]);
   }
   if (!extractVs(cfgHs_, cfgVs_)) {
-    ROS_ERROR("extractVs fail!");
+    RCLCPP_ERROR(nh_->get_logger(), "extractVs fail!");
     return false;
   }
   N_ = 2 * cfgHs_.size();

@@ -25,7 +25,7 @@ private:
     gridmap.from_msg(*msgPtr);
     sensor_msgs::msg::PointCloud2 pc;
     gridmap.occ2pc(pc);
-    pc.header.frame_id = "world";
+    pc.header.frame_id = "odom";
     pc.header.stamp = this->now();
     gridmap_vs_pub_->publish(pc);
   }
@@ -39,7 +39,7 @@ private:
     } else {
       gridmap.occ2pc(pc);
     }
-    pc.header.frame_id = "world";
+    pc.header.frame_id = "odom";
     pc.header.stamp = this->now();
     gridmap_inflate_vs_pub_->publish(pc);
   }

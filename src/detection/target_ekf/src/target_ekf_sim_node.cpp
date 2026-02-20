@@ -108,7 +108,7 @@ private:
     
     nav_msgs::msg::Odometry target_odom;
     target_odom.header.stamp = this->now();
-    target_odom.header.frame_id = "world";
+    target_odom.header.frame_id = "odom";
     target_odom.pose.pose.position.x = ekfPtr_->pos().x();
     target_odom.pose.pose.position.y = ekfPtr_->pos().y();
     target_odom.pose.pose.position.z = ekfPtr_->pos().z();

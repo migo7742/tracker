@@ -16,7 +16,7 @@ rosidl_generate_interfaces(${PROJECT_NAME}
   "msg/BoundingBoxes.msg"
   "msg/ObjectCount.msg"
   "msg/CarPosition.msg"
-  "msg/motorAngle.msg"
+  "msg/MotorAngle.msg"
   DEPENDENCIES std_msgs
 )
 

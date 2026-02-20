@@ -67,15 +67,19 @@ class Env {
 
   std::unordered_map<Eigen::Vector3i, NodePtr> visited_nodes_;
   std::shared_ptr<mapping::OccGridMap> mapPtr_;
+  std::unique_ptr<Node[]> pool_;
   NodePtr data_[MAX_MEMORY];
   double desired_dist_, theta_clearance_, tolerance_d_;
 
   inline NodePtr visit(const Eigen::Vector3i& idx) {
     auto iter = visited_nodes_.find(idx);
     if (iter == visited_nodes_.end()) {
+      if (visited_nodes_.size() >= MAX_MEMORY) {
+        return data_[MAX_MEMORY - 1];
+      }
       auto ptr = data_[visited_nodes_.size()];
       ptr->idx = idx;
-      ptr->valid = !mapPtr_->isOccupied(idx);
+      ptr->valid = mapPtr_->isInMap(idx) && !mapPtr_->isOccupied(idx);
       ptr->state = UNVISITED;
       visited_nodes_[idx] = ptr;
       return ptr;
@@ -85,15 +89,11 @@ class Env {
   }
 
  public:
-  // Constructor adapted for ROS 2
   Env(rclcpp::Node::SharedPtr nh,
       std::shared_ptr<mapping::OccGridMap>& mapPtr) : nh_(nh), mapPtr_(mapPtr) {
     
-    // Create Publisher
     hPolyPub_ = nh_->create_publisher<decomp_ros_msgs::msg::PolyhedronArray>("polyhedra", 1);
 
-    // Parameter Declarations (Required in ROS 2)
-    // Note: You might want to provide default values or handle exceptions
     auto declare_and_get = [&](const std::string& name, double& var, double default_val) {
         if (!nh_->has_parameter(name)) {
             nh_->declare_parameter(name, default_val);
@@ -101,18 +101,13 @@ class Env {
         nh_->get_parameter(name, var);
     };
 
-    declare_and_get("tracking_dist", desired_dist_, 1.0); // 默认值需根据实际情况调整
+    declare_and_get("tracking_dist", desired_dist_, 1.0);
     declare_and_get("tolerance_d", tolerance_d_, 0.2);
     declare_and_get("theta_clearance", theta_clearance_, 0.5);
 
+    pool_ = std::make_unique<Node[]>(MAX_MEMORY);
     for (int i = 0; i < MAX_MEMORY; ++i) {
-      data_[i] = new Node;
-    }
-  }
-  
-  ~Env() {
-    for (int i = 0; i < MAX_MEMORY; ++i) {
-      delete data_[i];
+      data_[i] = &pool_[i];
     }
   }
 
@@ -395,7 +390,7 @@ class Env {
   // Visualization: Updated message type and time/header
   inline void visCorridor(const vec_E<Polyhedron3D>& polyhedra) {
     decomp_ros_msgs::msg::PolyhedronArray poly_msg = DecompROS::polyhedron_array_to_ros(polyhedra);
-    poly_msg.header.frame_id = "world";
+    poly_msg.header.frame_id = "odom";
     poly_msg.header.stamp = nh_->get_clock()->now();
     hPolyPub_->publish(poly_msg);
   }
@@ -450,7 +445,7 @@ class Env {
     auto calulateHeuristic = [&](const NodePtr& ptr) {
       Eigen::Vector3i dp = end_idx - ptr->idx;
       double dr = dp.head(2).norm();
-      double lambda = 1 - stop_dist / dr;
+      double lambda = 1.0 - stop_dist / std::max(dr, 1e-6);
       double dx = lambda * dp.x();
       double dy = lambda * dp.y();
       double dz = dp.z();
@@ -463,21 +458,19 @@ class Env {
     // initialization of datastructures
     std::priority_queue<NodePtr, std::vector<NodePtr>, NodeComparator> open_set;
     std::vector<std::pair<Eigen::Vector3i, double>> neighbors;
-    // NOTE 6-connected graph
     for (int i = 0; i < 3; ++i) {
-      Eigen::Vector3i neighbor(0, 0, 0);
-      neighbor[i] = 1;
-      neighbors.emplace_back(neighbor, 1);
-      neighbor[i] = -1;
-      neighbors.emplace_back(neighbor, 1);
+      Eigen::Vector3i nb(0, 0, 0);
+      nb[i] = 1;
+      neighbors.emplace_back(nb, 1.0);
+      nb[i] = -1;
+      neighbors.emplace_back(nb, 1.0);
     }
     bool ret = false;
     NodePtr curPtr = visit(start_idx);
-    // NOTE we should permit the start pos invalid! (for corridor generation)
     if (!curPtr->valid) {
-      visited_nodes_.clear();
-      std::cout << "start postition invalid!" << std::endl;
-      return false;
+      RCLCPP_WARN_THROTTLE(nh_->get_logger(), *nh_->get_clock(), 2000,
+        "[env] start cell occupied, forcing free (drone is here)");
+      curPtr->valid = true;
     }
     curPtr->parent = nullptr;
     curPtr->g = 0;
@@ -591,21 +584,17 @@ class Env {
     // initialization of datastructures
     std::priority_queue<NodePtr, std::vector<NodePtr>, NodeComparator> open_set;
     std::vector<std::pair<Eigen::Vector3i, double>> neighbors;
-    // NOTE 6-connected graph
     for (int i = 0; i < 3; ++i) {
-      Eigen::Vector3i neighbor(0, 0, 0);
-      neighbor[i] = 1;
-      neighbors.emplace_back(neighbor, 1);
-      neighbor[i] = -1;
-      neighbors.emplace_back(neighbor, 1);
+      Eigen::Vector3i nb(0, 0, 0);
+      nb[i] = 1;
+      neighbors.emplace_back(nb, 1.0);
+      nb[i] = -1;
+      neighbors.emplace_back(nb, 1.0);
     }
     bool ret = false;
     NodePtr curPtr = visit(start_idx);
-    // NOTE we should permit the start pos invalid! (for corridor generation)
     if (!curPtr->valid) {
-      visited_nodes_.clear();
-      std::cout << "start postition invalid!" << std::endl;
-      return false;
+      curPtr->valid = true;
     }
     curPtr->parent = nullptr;
     curPtr->g = 0;
@@ -640,7 +629,6 @@ class Env {
         }
       }  // for each neighbor
       if (open_set.empty()) {
-        // std::cout << "start postition invalid!" << std::endl;
         std::cout << "[astar search] no way!" << std::endl;
         break;
       }
@@ -773,21 +761,17 @@ class Env {
     // initialization of datastructures
     std::priority_queue<NodePtr, std::vector<NodePtr>, NodeComparator> open_set;
     std::vector<std::pair<Eigen::Vector3i, double>> neighbors;
-    // NOTE 6-connected graph
     for (int i = 0; i < 3; ++i) {
-      Eigen::Vector3i neighbor(0, 0, 0);
-      neighbor[i] = 1;
-      neighbors.emplace_back(neighbor, 1);
-      neighbor[i] = -1;
-      neighbors.emplace_back(neighbor, 1);
+      Eigen::Vector3i nb(0, 0, 0);
+      nb[i] = 1;
+      neighbors.emplace_back(nb, 1.0);
+      nb[i] = -1;
+      neighbors.emplace_back(nb, 1.0);
     }
     bool ret = false;
     NodePtr curPtr = visit(start_idx);
-    // NOTE we should permit the start pos invalid! (for corridor generation)
     if (!curPtr->valid) {
-      visited_nodes_.clear();
-      std::cout << "[short astar]start postition invalid!" << std::endl;
-      return false;
+      curPtr->valid = true;
     }
     curPtr->parent = nullptr;
     curPtr->g = 0;
@@ -803,8 +787,6 @@ class Env {
           continue;
         }
         if (neighborPtr->state == OPEN) {
-          // check neighbor's g score
-          // determine whether to change its parent to current
           if (neighborPtr->g > curPtr->g + neighbor_dist) {
             neighborPtr->parent = curPtr;
             neighborPtr->g = curPtr->g + neighbor_dist;
@@ -822,7 +804,6 @@ class Env {
         }
       }  // for each neighbor
       if (open_set.empty()) {
-        // std::cout << "start postition invalid!" << std::endl;
         std::cout << "[short astar] no way!" << std::endl;
         break;
       }

@@ -29,8 +29,14 @@
   <depend>decomp_ros_utils</depend>
   
   <!-- System Dependencies -->
-  <depend>eigen3_cmake_module</depend> <!-- Recommended for finding Eigen3 in ROS 2 -->
+  <depend>eigen3_cmake_module</depend>
   <depend>eigen</depend>
+
+  <!-- Launch Dependencies -->
+  <exec_depend>launch</exec_depend>
+  <exec_depend>launch_ros</exec_depend>
+  <exec_depend>target_ekf</exec_depend>
+  <exec_depend>px4_odom_bridge</exec_depend>
 
   <export>
     <build_type>ament_cmake</build_type>

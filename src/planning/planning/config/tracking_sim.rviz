@@ -1,0 +1,260 @@
+Panels:
+  - Class: rviz_common/Displays
+    Name: Displays
+  - Class: rviz_common/Views
+    Name: Views
+Visualization Manager:
+  Class: ""
+  Displays:
+    - Class: rviz_default_plugins/Grid
+      Name: Grid
+      Value: true
+      Cell Size: 1
+      Line Style:
+        Line Width: 0.03
+        Value: Lines
+      Plane: XY
+      Plane Cell Count: 50
+      Color: 100; 100; 100
+
+    - Class: rviz_default_plugins/TF
+      Name: TF
+      Value: true
+      Show Arrows: false
+      Show Axes: true
+      Show Names: false
+      Frame Timeout: 15
+      Marker Scale: 0.3
+
+    # ───── 无人机里程计 ─────
+    - Class: rviz_default_plugins/Odometry
+      Name: Drone Odom
+      Value: true
+      Topic:
+        Value: /Odometry
+        Depth: 5
+        History Policy: Keep Last
+        Reliability Policy: Reliable
+      Position Tolerance: 0.1
+      Angle Tolerance: 0.1
+      Keep: 1
+      Shape:
+        Value: Arrow
+        Alpha: 1
+        Color: 0; 255; 0
+        Shaft Length: 0.3
+        Shaft Radius: 0.05
+        Head Length: 0.1
+        Head Radius: 0.1
+
+    # ───── 目标 EKF ─────
+    - Class: rviz_default_plugins/Odometry
+      Name: Target EKF
+      Value: true
+      Topic:
+        Value: /target_ekf_odom
+        Depth: 5
+        History Policy: Keep Last
+        Reliability Policy: Reliable
+      Position Tolerance: 0.1
+      Angle Tolerance: 0.1
+      Keep: 1
+      Shape:
+        Value: Arrow
+        Alpha: 1
+        Color: 255; 0; 0
+        Shaft Length: 0.3
+        Shaft Radius: 0.05
+        Head Length: 0.1
+        Head Radius: 0.1
+
+    # ───── YOLO 原始位置 ─────
+    - Class: rviz_default_plugins/Odometry
+      Name: YOLO Raw
+      Value: false
+      Topic:
+        Value: /yolo_odom
+        Depth: 5
+        History Policy: Keep Last
+        Reliability Policy: Reliable
+      Position Tolerance: 0.05
+      Angle Tolerance: 0.05
+      Keep: 5
+      Shape:
+        Value: Arrow
+        Alpha: 0.5
+        Color: 255; 165; 0
+        Shaft Length: 0.15
+        Shaft Radius: 0.03
+        Head Length: 0.05
+        Head Radius: 0.06
+
+    # ───── 膨胀栅格地图 ─────
+    - Class: rviz_default_plugins/PointCloud2
+      Name: Inflate GridMap
+      Value: true
+      Topic:
+        Value: /vs_gridmap_inflate
+        Depth: 1
+        History Policy: Keep Last
+        Reliability Policy: Reliable
+      Style: Flat Squares
+      Size (m): 0.15
+      Color Transformer: FlatColor
+      Color: 150; 150; 150
+      Alpha: 0.3
+      Use Fixed Frame: true
+
+    # ───── 规划轨迹 ─────
+    - Class: rviz_default_plugins/Path
+      Name: Trajectory
+      Value: true
+      Topic:
+        Value: /traj
+        Depth: 5
+        History Policy: Keep Last
+        Reliability Policy: Reliable
+      Color: 0; 255; 255
+      Alpha: 1
+      Line Style:
+        Value: Billboards
+        Line Width: 0.05
+
+    # ───── A* 路径 ─────
+    - Class: rviz_default_plugins/Path
+      Name: A* Path
+      Value: true
+      Topic:
+        Value: /astar
+        Depth: 5
+        History Policy: Keep Last
+        Reliability Policy: Reliable
+      Color: 255; 255; 0
+      Alpha: 0.8
+      Line Style:
+        Value: Billboards
+        Line Width: 0.03
+
+    # ───── 目标预测路径 ─────
+    - Class: rviz_default_plugins/Path
+      Name: Target Predict
+      Value: true
+      Topic:
+        Value: /car_predict
+        Depth: 5
+        History Policy: Keep Last
+        Reliability Policy: Reliable
+      Color: 255; 50; 50
+      Alpha: 0.8
+      Line Style:
+        Value: Billboards
+        Line Width: 0.03
+
+    # ───── 观测边界 ─────
+    - Class: rviz_default_plugins/Path
+      Name: Observable Margin
+      Value: true
+      Topic:
+        Value: /observable_margin
+        Depth: 5
+        History Policy: Keep Last
+        Reliability Policy: Reliable
+      Color: 255; 128; 0
+      Alpha: 0.6
+      Line Style:
+        Value: Billboards
+        Line Width: 0.02
+
+    # ───── 射线 ─────
+    - Class: rviz_default_plugins/Marker
+      Name: Ray
+      Value: true
+      Topic:
+        Value: /ray
+        Depth: 5
+        History Policy: Keep Last
+        Reliability Policy: Reliable
+
+    # ───── 可见区域 ─────
+    - Class: rviz_default_plugins/Marker
+      Name: Visible Region
+      Value: true
+      Topic:
+        Value: /visible_region
+        Depth: 5
+        History Policy: Keep Last
+        Reliability Policy: Reliable
+
+    # ───── 关键点 ─────
+    - Class: rviz_default_plugins/Marker
+      Name: Key Points
+      Value: true
+      Topic:
+        Value: /keyPts
+        Depth: 5
+        History Policy: Keep Last
+        Reliability Policy: Reliable
+
+    # ───── 可见点 ─────
+    - Class: rviz_default_plugins/PointCloud2
+      Name: Visible Points
+      Value: true
+      Topic:
+        Value: /visible_ps
+        Depth: 5
+        History Policy: Keep Last
+        Reliability Policy: Reliable
+      Style: Spheres
+      Size (m): 0.1
+      Color Transformer: FlatColor
+      Color: 0; 255; 128
+      Alpha: 0.8
+      Use Fixed Frame: true
+
+    # ───── 路径点 ─────
+    - Class: rviz_default_plugins/PointCloud2
+      Name: Way Points
+      Value: true
+      Topic:
+        Value: /way_pts
+        Depth: 5
+        History Policy: Keep Last
+        Reliability Policy: Reliable
+      Style: Spheres
+      Size (m): 0.15
+      Color Transformer: FlatColor
+      Color: 255; 0; 255
+      Alpha: 1
+      Use Fixed Frame: true
+
+  Global Options:
+    Background Color: 48; 48; 48
+    Fixed Frame: odom
+    Frame Rate: 30
+  Value: true
+  Views:
+    Current:
+      Class: rviz_default_plugins/Orbit
+      Name: Current View
+      Distance: 20
+      Enable Stereo Rendering:
+        Value: false
+      Focal Point:
+        X: 0
+        Y: 0
+        Z: 1
+      Focal Shape Fixed Size: true
+      Focal Shape Size: 0.05
+      Invert Z Axis: false
+      Near Clip Distance: 0.01
+      Pitch: 0.5
+      Target Frame: <Fixed Frame>
+      Value: Orbit
+      Yaw: 0.8
+Window Geometry:
+  Displays:
+    collapsed: false
+  Height: 900
+  Width: 1600
+  X: 100
+  Y: 100

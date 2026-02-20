@@ -140,7 +140,7 @@ class Visualization {
                         const double a = 1) {
     auto pub = get_publisher<visualization_msgs::msg::Marker>(topic);
     visualization_msgs::msg::Marker marker;
-    marker.header.frame_id = "world";
+    marker.header.frame_id = "odom";
     marker.type = visualization_msgs::msg::Marker::SPHERE;
     marker.action = visualization_msgs::msg::Marker::ADD;
     setMarkerColor(marker, color, a);
@@ -160,7 +160,7 @@ class Visualization {
       point_cloud.points.emplace_back(pt[0], pt[1], pt[2]);
     }
     pcl::toROSMsg(point_cloud, point_cloud_msg);
-    point_cloud_msg.header.frame_id = "world";
+    point_cloud_msg.header.frame_id = "odom";
     point_cloud_msg.header.stamp = nh_->get_clock()->now();
     pub->publish(point_cloud_msg);
   }
@@ -170,14 +170,14 @@ class Visualization {
     auto pub = get_publisher<nav_msgs::msg::Path>(topic);
     nav_msgs::msg::Path path_msg;
     geometry_msgs::msg::PoseStamped tmpPose;
-    tmpPose.header.frame_id = "world";
+    tmpPose.header.frame_id = "odom";
     for (const auto& pt : path) {
       tmpPose.pose.position.x = pt[0];
       tmpPose.pose.position.y = pt[1];
       tmpPose.pose.position.z = pt[2];
       path_msg.poses.push_back(tmpPose);
     }
-    path_msg.header.frame_id = "world";
+    path_msg.header.frame_id = "odom";
     path_msg.header.stamp = nh_->get_clock()->now();
     pub->publish(path_msg);
   }
@@ -189,7 +189,7 @@ class Visualization {
                        const double a = 0.2) {
     auto pub = get_publisher<visualization_msgs::msg::MarkerArray>(topic);
     visualization_msgs::msg::Marker marker;
-    marker.header.frame_id = "world";
+    marker.header.frame_id = "odom";
     marker.type = visualization_msgs::msg::Marker::SPHERE;
     marker.action = visualization_msgs::msg::Marker::ADD;
     marker.id = 0;
@@ -216,7 +216,7 @@ class Visualization {
                             const double a = 0.2) {
     auto pub = get_publisher<visualization_msgs::msg::MarkerArray>(topic);
     visualization_msgs::msg::Marker marker;
-    marker.header.frame_id = "world";
+    marker.header.frame_id = "odom";
     marker.type = visualization_msgs::msg::Marker::SPHERE;
     marker.action = visualization_msgs::msg::Marker::ADD;
     marker.id = 0;
@@ -240,7 +240,7 @@ class Visualization {
   void visualize_pairline(const PAIRLINE& pairline, const TOPIC& topic) {
     auto pub = get_publisher<visualization_msgs::msg::Marker>(topic);
     visualization_msgs::msg::Marker marker;
-    marker.header.frame_id = "world";
+    marker.header.frame_id = "odom";
     marker.type = visualization_msgs::msg::Marker::LINE_LIST;
     marker.action = visualization_msgs::msg::Marker::ADD;
     setMarkerPose(marker, 0, 0, 0);
@@ -264,7 +264,7 @@ class Visualization {
     visualization_msgs::msg::Marker arrow_msg;
     arrow_msg.type = visualization_msgs::msg::Marker::ARROW;
     arrow_msg.action = visualization_msgs::msg::Marker::ADD;
-    arrow_msg.header.frame_id = "world";
+    arrow_msg.header.frame_id = "odom";
     arrow_msg.id = 0;
     arrow_msg.points.resize(2);
     setMarkerPose(arrow_msg, 0, 0, 0);
@@ -289,7 +289,7 @@ class Visualization {
     visualization_msgs::msg::Marker marker;
     marker.type = visualization_msgs::msg::Marker::TRIANGLE_LIST;
     marker.action = visualization_msgs::msg::Marker::ADD;
-    marker.header.frame_id = "world";
+    marker.header.frame_id = "odom";
     marker.id = 0;
     setMarkerPose(marker, 0, 0, 0);
     setMarkerScale(marker, 1, 1, 1);
@@ -328,7 +328,7 @@ class Visualization {
     visualization_msgs::msg::Marker arrow_msg;
     arrow_msg.type = visualization_msgs::msg::Marker::ARROW;
     arrow_msg.action = visualization_msgs::msg::Marker::ADD;
-    arrow_msg.header.frame_id = "world";
+    arrow_msg.header.frame_id = "odom";
     arrow_msg.id = 0;
     arrow_msg.points.resize(2);
     setMarkerPose(arrow_msg, 0, 0, 0);
@@ -376,7 +376,7 @@ class Visualization {
     visualization_msgs::msg::Marker path_msg;
     path_msg.type = visualization_msgs::msg::Marker::LINE_STRIP;
     path_msg.action = visualization_msgs::msg::Marker::ADD;
-    path_msg.header.frame_id = "world";
+    path_msg.header.frame_id = "odom";
     path_msg.id = 0;
     setMarkerPose(path_msg, 0, 0, 0);
     setMarkerScale(path_msg, 0.02, 0.05, 0);
@@ -412,7 +412,7 @@ class Visualization {
     visualization_msgs::msg::Marker path_msg;
     path_msg.type = visualization_msgs::msg::Marker::LINE_STRIP;
     path_msg.action = visualization_msgs::msg::Marker::ADD;
-    path_msg.header.frame_id = "world";
+    path_msg.header.frame_id = "odom";
     path_msg.id = 0;
     setMarkerPose(path_msg, 0, 0, 0);
     setMarkerScale(path_msg, 0.02, 0.05, 0);

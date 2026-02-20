@@ -252,24 +252,28 @@ bool TrajOpt::extractVs(const std::vector<Eigen::MatrixXd>& hPs,
   return true;
 }
 
-TrajOpt::TrajOpt(ros::NodeHandle& nh) : nh_(nh) {
-  // nh.getParam("N", N_);
-  nh.getParam("K", K_);
-  // load dynamic paramters
-  nh.getParam("vmax", vmax_);
-  nh.getParam("amax", amax_);
-  nh.getParam("rhoT", rhoT_);
-  nh.getParam("rhoP", rhoP_);
-  nh.getParam("rhoTracking", rhoTracking_);
-  nh.getParam("rhosVisibility", rhosVisibility_);
-  nh.getParam("theta_clearance", theta_clearance_);
-  nh.getParam("rhoV", rhoV_);
-  nh.getParam("rhoA", rhoA_);
-  nh.getParam("tracking_dur", tracking_dur_);
-  nh.getParam("tracking_dist", tracking_dist_);
-  nh.getParam("tracking_dt", tracking_dt_);
-  nh.getParam("clearance_d", clearance_d_);
-  nh.getParam("tolerance_d", tolerance_d_);
+TrajOpt::TrajOpt(rclcpp::Node::SharedPtr nh) : nh_(nh) {
+  auto get = [&](const std::string& name, auto& var, auto default_val) {
+    if (!nh_->has_parameter(name)) {
+      nh_->declare_parameter(name, decltype(default_val)(default_val));
+    }
+    nh_->get_parameter(name, var);
+  };
+  get("K", K_, 5);
+  get("vmax", vmax_, 3.0);
+  get("amax", amax_, 6.0);
+  get("rhoT", rhoT_, 1.0);
+  get("rhoP", rhoP_, 1.0);
+  get("rhoTracking", rhoTracking_, 1.0);
+  get("rhosVisibility", rhosVisibility_, 1.0);
+  get("theta_clearance", theta_clearance_, 0.5);
+  get("rhoV", rhoV_, 1.0);
+  get("rhoA", rhoA_, 1.0);
+  get("tracking_dur", tracking_dur_, 1.0);
+  get("tracking_dist", tracking_dist_, 3.0);
+  get("tracking_dt", tracking_dt_, 0.1);
+  get("clearance_d", clearance_d_, 0.5);
+  get("tolerance_d", tolerance_d_, 0.1);
 }
 
 void TrajOpt::setBoundConds(const Eigen::MatrixXd& iniState,
@@ -335,7 +339,7 @@ bool TrajOpt::generate_traj(const Eigen::MatrixXd& iniState,
     cfgHs_.push_back(cfgHs_[0]);
   }
   if (!extractVs(cfgHs_, cfgVs_)) {
-    ROS_ERROR("extractVs fail!");
+    RCLCPP_ERROR(nh_->get_logger(), "extractVs fail!");
     return false;
   }
   N_ = 2 * cfgHs_.size();
@@ -348,7 +352,6 @@ bool TrajOpt::generate_traj(const Eigen::MatrixXd& iniState,
   for (const auto& cfgV : cfgVs_) {
     dim_p_ += cfgV.cols() - 1;
   }
-  // std::cout << "dim_p_: " << dim_p_ << std::endl;
   p_.resize(dim_p_);
   t_.resize(dim_t_);
   x_ = new double[dim_p_ + dim_t_ + 1];
@@ -363,14 +366,13 @@ bool TrajOpt::generate_traj(const Eigen::MatrixXd& iniState,
   x_[dim_p_ + dim_t_] = 0.1;
   int opt_ret = optimize();
   if (opt_ret < 0) {
+    delete[] x_;
     return false;
   }
   double sumT = sum_T_ + x_[dim_p_ + dim_t_] * x_[dim_p_ + dim_t_];
   forwardT(t_, sumT, T);
   forwardP(p_, cfgVs_, P);
   jerkOpt_.generate(P, T);
-  // std::cout << "P: \n" << P << std::endl;
-  // std::cout << "T: " << T.transpose() << std::endl;
   traj = jerkOpt_.getTraj();
   delete[] x_;
   return true;
@@ -388,7 +390,7 @@ bool TrajOpt::generate_traj(const Eigen::MatrixXd& iniState,
     cfgHs_.push_back(cfgHs_[0]);
   }
   if (!extractVs(cfgHs_, cfgVs_)) {
-    ROS_ERROR("extractVs fail!");
+    RCLCPP_ERROR(nh_->get_logger(), "extractVs fail!");
     return false;
   }
   N_ = 2 * cfgHs_.size();
@@ -414,14 +416,13 @@ bool TrajOpt::generate_traj(const Eigen::MatrixXd& iniState,
   x_[dim_p_ + dim_t_] = 0.1;
   int opt_ret = optimize();
   if (opt_ret < 0) {
+    delete[] x_;
     return false;
   }
   double sumT = sum_T_ + x_[dim_p_ + dim_t_] * x_[dim_p_ + dim_t_];
   forwardT(t_, sumT, T);
   forwardP(p_, cfgVs_, P);
   jerkOpt_.generate(P, T);
-  // std::cout << "P: \n" << P << std::endl;
-  // std::cout << "T: " << T.transpose() << std::endl;
   traj = jerkOpt_.getTraj();
   delete[] x_;
   return true;
@@ -631,7 +632,7 @@ bool TrajOpt::grad_cost_p_tracking(const Eigen::Vector3d& p,
   double dr2 = dp.head(2).squaredNorm();
   double dz2 = dp.z() * dp.z();
 
-  bool ret;
+  bool ret = false;
   gradp.setZero();
   costp = 0;
 
@@ -672,7 +673,7 @@ bool TrajOpt::grad_cost_p_landing(const Eigen::Vector3d& p,
   double dr2 = dp.head(2).squaredNorm();
   double dz2 = dp.z() * dp.z();
 
-  bool ret;
+  bool ret = false;
   gradp.setZero();
   costp = 0;
 

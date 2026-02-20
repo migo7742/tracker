@@ -164,7 +164,7 @@ class MappingNode : public rclcpp::Node {
     }
 
     quadrotor_msgs::msg::OccMap3d gridmap_msg;
-    gridmap_msg.header.frame_id = "world";
+    gridmap_msg.header.frame_id = "odom";
     gridmap_msg.header.stamp = this->now();
     gridmap_.to_msg(gridmap_msg);
     gridmap_inflate_pub_->publish(gridmap_msg);
@@ -198,7 +198,7 @@ class MappingNode : public rclcpp::Node {
     quadrotor_msgs::msg::OccMap3d gridmap_msg;
     gridmap_.to_msg(gridmap_msg);
     gridmap_msg.header.stamp = this->now();
-    gridmap_msg.header.frame_id = "world";
+    gridmap_msg.header.frame_id = "odom";
     gridmap_inflate_pub_->publish(gridmap_msg);
   }
 
@@ -312,8 +312,8 @@ class MappingNode : public rclcpp::Node {
       global_map_timer_ = this->create_wall_timer(
           std::chrono::seconds(1), std::bind(&MappingNode::global_map_timer_callback, this));
     } else {
-      depth_sub_.subscribe(this, "depth", rmw_qos_profile_sensor_data);
-      odom_sub_.subscribe(this, "odom", rmw_qos_profile_default); // Odom needs reliability
+      depth_sub_.subscribe(this, "depth", rmw_qos_profile_default);
+      odom_sub_.subscribe(this, "odom", rmw_qos_profile_default);
       
       depth_odom_sync_Ptr_ = std::make_shared<ImageOdomSynchronizer>(
           ImageOdomSyncPolicy(100), depth_sub_, odom_sub_);

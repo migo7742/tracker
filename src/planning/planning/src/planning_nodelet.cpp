@@ -64,7 +64,7 @@ class PlanningNode : public rclcpp::Node {
   double tracking_dur_, tracking_dist_, tolerance_d_;
 
   Trajectory traj_poly_;
-  rclcpp::Time replan_stamp_;
+  rclcpp::Time replan_stamp_{0, 0, RCL_ROS_TIME};
   int traj_id_ = 0;
   bool wait_hover_ = true;
   bool force_hover_ = true;
@@ -163,6 +163,10 @@ class PlanningNode : public rclcpp::Node {
   void plan_timer_callback() {
     heartbeat_pub_->publish(std_msgs::msg::Empty());
     if (!odom_received_ || !map_received_) {
+      RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 3000,
+        "Waiting: odom=%d map=%d triger=%d target=%d",
+        odom_received_.load(), map_received_.load(),
+        triger_received_.load(), target_received_.load());
       return;
     }
     // obtain state of odom
@@ -191,6 +195,21 @@ class PlanningNode : public rclcpp::Node {
       ;
     replanStateMsg_.target = target_msg_;
     target_lock_.clear();
+
+    double target_age = (this->now() - rclcpp::Time(replanStateMsg_.target.header.stamp)).seconds();
+    if (target_age > 1.0) {
+      if (!wait_hover_) {
+        pub_hover_p(Eigen::Vector3d(odom_msg.pose.pose.position.x,
+                                     odom_msg.pose.pose.position.y,
+                                     odom_msg.pose.pose.position.z), this->now());
+        wait_hover_ = true;
+        force_hover_ = true;
+      }
+      RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 2000,
+        "[planner] target data stale (%.1fs), hovering...", target_age);
+      return;
+    }
+
     Eigen::Vector3d target_p(replanStateMsg_.target.pose.pose.position.x,
                              replanStateMsg_.target.pose.pose.position.y,
                              replanStateMsg_.target.pose.pose.position.z);
@@ -262,10 +281,7 @@ class PlanningNode : public rclcpp::Node {
 
     // NOTE prediction
     std::vector<Eigen::Vector3d> target_predcit;
-    // ros::Time t_start = ros::Time::now();
     bool generate_new_traj_success = prePtr_->predict(target_p, target_v, target_predcit);
-    // ros::Time t_stop = ros::Time::now();
-    // std::cout << "predict costs: " << (t_stop - t_start).toSec() * 1e3 << "ms" << std::endl;
     if (generate_new_traj_success) {
       Eigen::Vector3d observable_p = target_predcit.back();
       visPtr_->visualize_path(target_predcit, "car_predict");
@@ -282,23 +298,25 @@ class PlanningNode : public rclcpp::Node {
     rclcpp::Time replan_stamp = this->now() + rclcpp::Duration::from_seconds(0.03);
     double replan_t = (replan_stamp - replan_stamp_).seconds();
     if (force_hover_ || replan_t > traj_poly_.getTotalDuration()) {
-      // should replan from the hover state
       iniState.col(0) = odom_p;
       iniState.col(1) = odom_v;
     } else {
-      // should replan from the last trajectory
       iniState.col(0) = traj_poly_.getPos(replan_t);
       iniState.col(1) = traj_poly_.getVel(replan_t);
       iniState.col(2) = traj_poly_.getAcc(replan_t);
     }
     replanStateMsg_.header.stamp = this->now();
-    replanStateMsg_.iniState.resize(9);
-    Eigen::Map<Eigen::MatrixXd>(replanStateMsg_.iniState.data(), 3, 3) = iniState;
+    replanStateMsg_.ini_state.resize(9);
+    Eigen::Map<Eigen::MatrixXd>(replanStateMsg_.ini_state.data(), 3, 3) = iniState;
 
     // NOTE path searching
     Eigen::Vector3d p_start = iniState.col(0);
     std::vector<Eigen::Vector3d> path, way_pts;
-
+    RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 1000,
+      "[planner] drone=(%.2f,%.2f,%.2f) target=(%.2f,%.2f,%.2f) dist=%.2f",
+      odom_p.x(), odom_p.y(), odom_p.z(),
+      target_p.x(), target_p.y(), target_p.z(),
+      (odom_p - target_p).norm());
     if (generate_new_traj_success) {
       if (land_triger_received_) {
         generate_new_traj_success = envPtr_->short_astar(p_start, target_p, path);
@@ -311,6 +329,11 @@ class PlanningNode : public rclcpp::Node {
     std::vector<double> thetas;
     Trajectory traj;
     if (generate_new_traj_success) {
+      RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 1000,
+        "[planner] path: start=(%.2f,%.2f,%.2f) end=(%.2f,%.2f,%.2f) pts=%zu",
+        path.front().x(), path.front().y(), path.front().z(),
+        path.back().x(), path.back().y(), path.back().z(),
+        path.size());
       visPtr_->visualize_path(path, "astar");
       if (land_triger_received_) {
         for (const auto& p : target_predcit) {
@@ -325,7 +348,6 @@ class PlanningNode : public rclcpp::Node {
         visPtr_->visualize_pointcloud(visible_ps, "visible_ps");
         visPtr_->visualize_fan_shape_meshes(target_predcit, visible_ps, thetas, "visible_region");
 
-        // TODO change the final state
         std::vector<std::pair<Eigen::Vector3d, Eigen::Vector3d>> rays;
         for (int i = 0; i < (int)way_pts.size(); ++i) {
           rays.emplace_back(target_predcit[i], way_pts[i]);
@@ -348,6 +370,10 @@ class PlanningNode : public rclcpp::Node {
       finState.setZero(3, 3);
       finState.col(0) = path.back();
       finState.col(1) = target_v;
+      RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 1000,
+        "[planner] finState=(%.2f,%.2f,%.2f) corridors=%zu",
+        finState.col(0).x(), finState.col(0).y(), finState.col(0).z(),
+        hPolys.size());
       if (land_triger_received_) {
         finState.col(0) = target_predcit.back();
         generate_new_traj_success = trajOptPtr_->generate_traj(iniState, finState, target_predcit, hPolys, traj);
@@ -386,7 +412,7 @@ class PlanningNode : public rclcpp::Node {
       replanStateMsg_.state = 1;
       replanState_pub_->publish(replanStateMsg_);
       return;
-    } else if (validcheck(traj_poly_, replan_stamp_)) {
+    } else if (!validcheck(traj_poly_, replan_stamp_)) {
       force_hover_ = true;
       RCLCPP_FATAL(this->get_logger(), "[planner] EMERGENCY STOP!!!");
       replanStateMsg_.state = 2;
@@ -397,7 +423,7 @@ class PlanningNode : public rclcpp::Node {
       RCLCPP_ERROR(this->get_logger(), "[planner] REPLAN FAILED, EXECUTE LAST TRAJ...");
       replanStateMsg_.state = 3;
       replanState_pub_->publish(replanStateMsg_);
-      return;  // current generated traj invalid but last is valid
+      return;
     }
     visPtr_->visualize_traj(traj, "traj");
   }
@@ -486,18 +512,16 @@ class PlanningNode : public rclcpp::Node {
     rclcpp::Time replan_stamp = this->now() + rclcpp::Duration::from_seconds(0.03);
     double replan_t = (replan_stamp - replan_stamp_).seconds();
     if (force_hover_ || replan_t > traj_poly_.getTotalDuration()) {
-      // should replan from the hover state
       iniState.col(0) = odom_p;
       iniState.col(1) = odom_v;
     } else {
-      // should replan from the last trajectory
       iniState.col(0) = traj_poly_.getPos(replan_t);
       iniState.col(1) = traj_poly_.getVel(replan_t);
       iniState.col(2) = traj_poly_.getAcc(replan_t);
     }
     replanStateMsg_.header.stamp = this->now();
-    replanStateMsg_.iniState.resize(9);
-    Eigen::Map<Eigen::MatrixXd>(replanStateMsg_.iniState.data(), 3, 3) = iniState;
+    replanStateMsg_.ini_state.resize(9);
+    Eigen::Map<Eigen::MatrixXd>(replanStateMsg_.ini_state.data(), 3, 3) = iniState;
 
     // NOTE generate an extra corridor
     Eigen::Vector3d p_start = iniState.col(0);
@@ -580,7 +604,7 @@ class PlanningNode : public rclcpp::Node {
       RCLCPP_ERROR(this->get_logger(), "[planner] REPLAN FAILED, EXECUTE LAST TRAJ...");
       replanStateMsg_.state = 3;
       replanState_pub_->publish(replanStateMsg_);
-      return;  // current generated traj invalid but last is valid
+      return;
     }
     visPtr_->visualize_traj(traj, "traj");
   }
@@ -591,7 +615,7 @@ class PlanningNode : public rclcpp::Node {
     iniState.setZero(3, 3);
     rclcpp::Time replan_stamp = this->now() + rclcpp::Duration::from_seconds(0.03);
 
-    iniState = Eigen::Map<Eigen::MatrixXd>(replanStateMsg_.iniState.data(), 3, 3);
+    iniState = Eigen::Map<Eigen::MatrixXd>(replanStateMsg_.ini_state.data(), 3, 3);
     Eigen::Vector3d target_p(replanStateMsg_.target.pose.pose.position.x,
                              replanStateMsg_.target.pose.pose.position.y,
                              replanStateMsg_.target.pose.pose.position.z);

@@ -3,7 +3,7 @@
 // ROS 2 Header
 #include <rclcpp/rclcpp.hpp>
 
-#include <Eigen/Eigen.h>
+#include <Eigen/Eigen>
 #include <vector>
 #include "minco.hpp"
 

@@ -14,7 +14,7 @@ endif()
 find_package(ament_cmake REQUIRED)
 find_package(rclcpp REQUIRED)
 find_package(nav_msgs REQUIRED)
-find_package(object_detection_msgs REQUIRED)
+find_package(vision_msgs REQUIRED)
 find_package(message_filters REQUIRED)
 find_package(Eigen3 REQUIRED)
 find_package(tf2_eigen REQUIRED) # 推荐引入，用于处理四元数转换
@@ -30,7 +30,7 @@ add_executable(target_ekf_node src/target_ekf_node.cpp)
 ament_target_dependencies(target_ekf_node
   rclcpp
   nav_msgs
-  object_detection_msgs
+  vision_msgs
   message_filters
   tf2_eigen
 )

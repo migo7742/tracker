@@ -3,7 +3,7 @@
 #include <message_filters/sync_policies/approximate_time.h>
 #include <message_filters/synchronizer.h>
 #include <nav_msgs/msg/odometry.hpp>
-#include <object_detection_msgs/msg/bounding_boxes.hpp>
+#include <vision_msgs/msg/detection2_d_array.hpp>
 #include <Eigen/Geometry>
 #include <Eigen/Dense>
 
@@ -69,8 +69,11 @@ public:
     this->declare_parameter("cam_fy", 0.0);
     this->declare_parameter("cam_cx", 0.0);
     this->declare_parameter("cam_cy", 0.0);
+    this->declare_parameter("cam_height", 480);
     this->declare_parameter("pitch_thr", 30.0);
     this->declare_parameter("ekf_rate", 20);
+    this->declare_parameter("target_class", std::string("person"));
+    this->declare_parameter("target_real_height", 1.7);
 
     // 获取参数
     std::vector<double> tmp;
@@ -90,7 +93,10 @@ public:
     this->get_parameter("cam_fy", fy_);
     this->get_parameter("cam_cx", cx_);
     this->get_parameter("cam_cy", cy_);
+    this->get_parameter("cam_height", cam_height_);
     this->get_parameter("pitch_thr", pitch_thr_);
+    this->get_parameter("target_class", target_class_);
+    this->get_parameter("target_real_height", target_real_height_);
 
     int ekf_rate = 20;
     this->get_parameter("ekf_rate", ekf_rate);
@@ -109,8 +115,17 @@ public:
     single_odom_sub_ = this->create_subscription<nav_msgs::msg::Odometry>(
       "odom", 100, std::bind(&TargetEkfNode::odom_callback, this, _1));
 
+    // 单独的 YOLO 订阅用于诊断
+    single_yolo_sub_ = this->create_subscription<vision_msgs::msg::Detection2DArray>(
+        "yolo", 10, [this](const vision_msgs::msg::Detection2DArray::ConstSharedPtr msg) {
+          yolo_count_++;
+          if (yolo_count_ % 30 == 1) {
+            RCLCPP_INFO(this->get_logger(), "[diag] yolo received (#%d), stamp=%d.%09d, detections=%zu",
+                yolo_count_, msg->header.stamp.sec, msg->header.stamp.nanosec, msg->detections.size());
+          }
+        });
+
     // Message Filters
-    // ROS2 中 message_filters 需要传递 this 指针
     yolo_sub_.subscribe(this, "yolo", rmw_qos_profile_default);
     odom_sub_.subscribe(this, "odom", rmw_qos_profile_default);
 
@@ -125,13 +140,15 @@ public:
   }
 
 private:
-  typedef message_filters::sync_policies::ApproximateTime<object_detection_msgs::msg::BoundingBoxes, nav_msgs::msg::Odometry> YoloOdomSyncPolicy;
+  typedef message_filters::sync_policies::ApproximateTime<vision_msgs::msg::Detection2DArray, nav_msgs::msg::Odometry> YoloOdomSyncPolicy;
   typedef message_filters::Synchronizer<YoloOdomSyncPolicy> YoloOdomSynchronizer;
 
   rclcpp::Publisher<nav_msgs::msg::Odometry>::SharedPtr target_odom_pub_, yolo_odom_pub_;
   rclcpp::Subscription<nav_msgs::msg::Odometry>::SharedPtr single_odom_sub_;
+  rclcpp::Subscription<vision_msgs::msg::Detection2DArray>::SharedPtr single_yolo_sub_;
+  int odom_count_ = 0, yolo_count_ = 0, sync_count_ = 0;
   
-  message_filters::Subscriber<object_detection_msgs::msg::BoundingBoxes> yolo_sub_;
+  message_filters::Subscriber<vision_msgs::msg::Detection2DArray> yolo_sub_;
   message_filters::Subscriber<nav_msgs::msg::Odometry> odom_sub_;
   std::shared_ptr<YoloOdomSynchronizer> yolo_odom_sync_Ptr_;
   
@@ -141,7 +158,10 @@ private:
   Eigen::Matrix3d cam2body_R_;
   Eigen::Vector3d cam2body_p_;
   double fx_, fy_, cx_, cy_;
+  int cam_height_;
   double pitch_thr_;
+  double target_real_height_;
+  std::string target_class_;
   rclcpp::Time last_update_stamp_;
 
   void predict_state_callback() {
@@ -155,7 +175,7 @@ private:
 
     nav_msgs::msg::Odometry target_odom;
     target_odom.header.stamp = this->now();
-    target_odom.header.frame_id = "world";
+    target_odom.header.frame_id = "odom";
     target_odom.pose.pose.position.x = ekfPtr_->pos().x();
     target_odom.pose.pose.position.y = ekfPtr_->pos().y();
     target_odom.pose.pose.position.z = ekfPtr_->pos().z();
@@ -166,8 +186,13 @@ private:
     target_odom_pub_->publish(target_odom);
   }
 
-  void update_state_callback(const object_detection_msgs::msg::BoundingBoxes::ConstSharedPtr& bboxes_msg, 
+  void update_state_callback(const vision_msgs::msg::Detection2DArray::ConstSharedPtr& det_msg,
                              const nav_msgs::msg::Odometry::ConstSharedPtr& odom_msg) {
+    sync_count_++;
+    RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 2000,
+        "[diag] sync callback #%d! yolo_stamp=%d odom_stamp=%d",
+        sync_count_, det_msg->header.stamp.sec, odom_msg->header.stamp.sec);
+
     Eigen::Vector3d odom_p;
     Eigen::Quaterniond odom_q;
     odom_p(0) = odom_msg->pose.pose.position.x;
@@ -181,22 +206,39 @@ private:
     Eigen::Vector3d cam_p = odom_q.toRotationMatrix() * cam2body_p_ + odom_p;
     Eigen::Quaterniond cam_q = odom_q * Eigen::Quaterniond(cam2body_R_);
 
-    if (bboxes_msg->bounding_boxes.empty()) return;
+    if (det_msg->detections.empty()) return;
 
-    auto yolo_bbox = bboxes_msg->bounding_boxes.front();
-    double xmin = yolo_bbox.xmin;
-    double xmax = yolo_bbox.xmax;
-    double ymin = yolo_bbox.ymin;
-    double ymax = yolo_bbox.ymax;
+    // 从 Detection2DArray 中选取第一个匹配 target_class_ 的检测
+    // 如果 target_class_ 为空则取第一个
+    const vision_msgs::msg::Detection2D* chosen = nullptr;
+    for (const auto &det : det_msg->detections) {
+      if (det.results.empty()) continue;
+      if (target_class_.empty() || det.results.front().hypothesis.class_id == target_class_) {
+        chosen = &det;
+        break;
+      }
+    }
+    if (!chosen) return;
 
-    double pixel_thr = 30;
-    if (ymin < pixel_thr || ymax > 480 - pixel_thr) {
-      RCLCPP_ERROR(this->get_logger(), "pitch out of range!");
+    // center + size → xmin/ymin/xmax/ymax
+    double cx = chosen->bbox.center.position.x;
+    double cy = chosen->bbox.center.position.y;
+    double w  = chosen->bbox.size_x;
+    double h  = chosen->bbox.size_y;
+    double xmin = cx - w / 2.0;
+    double xmax = cx + w / 2.0;
+    double ymin = cy - h / 2.0;
+    double ymax = cy + h / 2.0;
+
+    if (ymin < pitch_thr_ || ymax > cam_height_ - pitch_thr_) {
+      RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 2000,
+          "pitch out of range: ymin=%.0f ymax=%.0f (valid: [%.0f, %d])",
+          ymin, ymax, pitch_thr_, static_cast<int>(cam_height_ - pitch_thr_));
       return;
     }
 
     double height = ymax - ymin;
-    double depth = 0.7 / height * fy_;
+    double depth = target_real_height_ / height * fy_;
     double y = ((ymin + ymax) * 0.5 - cy_) * depth / fy_;
     double x = ((xmin + xmax) * 0.5 - cx_) * depth / fx_;
     Eigen::Vector3d p(x, y, depth);
@@ -204,8 +246,8 @@ private:
     p = cam_q * p + cam_p;
 
     nav_msgs::msg::Odometry yolo_odom;
-    yolo_odom.header.stamp = bboxes_msg->header.stamp;
-    yolo_odom.header.frame_id = "world";
+    yolo_odom.header.stamp = det_msg->header.stamp;
+    yolo_odom.header.frame_id = "odom";
     yolo_odom.pose.pose.orientation.w = 1.0;
     yolo_odom.pose.pose.position.x = p.x();
     yolo_odom.pose.pose.position.y = p.y();
@@ -226,8 +268,11 @@ private:
   }
 
   void odom_callback(const nav_msgs::msg::Odometry::ConstSharedPtr msg) {
-    (void)msg; // Suppress unused warning
-    // std::cout << "_now stamp: " << msg->header.stamp.sec << std::endl;
+    odom_count_++;
+    if (odom_count_ % 100 == 1) {
+      RCLCPP_INFO(this->get_logger(), "[diag] odom received (#%d), stamp=%d.%09d",
+          odom_count_, msg->header.stamp.sec, msg->header.stamp.nanosec);
+    }
   }
 };
 

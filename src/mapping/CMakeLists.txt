@@ -21,9 +21,7 @@ find_package(sensor_msgs REQUIRED)
 find_package(geometry_msgs REQUIRED)
 find_package(visualization_msgs REQUIRED)
 find_package(std_msgs REQUIRED)
-# 假设 pose_utils 和 object_detection_msgs 已经迁移并安装
-find_package(pose_utils REQUIRED) 
-find_package(object_detection_msgs REQUIRED)
+
 
 # System dependencies
 find_package(Eigen3 REQUIRED)
@@ -74,8 +72,6 @@ ament_target_dependencies(${PROJECT_NAME}_component
   nav_msgs
   sensor_msgs
   geometry_msgs
-  pose_utils
-  object_detection_msgs
 )
 
 # 注册组件 (替代了 nodelet_plugin.xml)
@@ -125,7 +121,16 @@ install(TARGETS
 )
 
 install(DIRECTORY include/
-  DESTINATION include/${PROJECT_NAME}
+  DESTINATION include
+)
+
+ament_export_include_directories(include)
+ament_export_libraries(${PROJECT_NAME}_lib)
+ament_export_dependencies(
+  rclcpp
+  sensor_msgs
+  pcl_conversions
+  quadrotor_msgs
 )
 
 ament_package()
