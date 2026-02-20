@@ -57,7 +57,9 @@ class NodeComparator {
 
 class Env {
   static constexpr int MAX_MEMORY = 1 << 18;
+  static constexpr int SHORT_MAX_MEMORY = 1 << 14;  // 16384, enough for short-range
   static constexpr double MAX_DURATION = 0.2;
+  static constexpr double SHORT_MAX_DURATION = 0.05;
 
  private:
   // ROS 2 Members
@@ -601,6 +603,7 @@ class Env {
     calulateHeuristic(curPtr);
     curPtr->state = CLOSE;
 
+    auto t_astar_start = std::chrono::steady_clock::now();
     while (visited_nodes_.size() < MAX_MEMORY) {
       for (const auto& neighbor : neighbors) {
         auto neighbor_idx = curPtr->idx + neighbor.first;
@@ -610,8 +613,6 @@ class Env {
           continue;
         }
         if (neighborPtr->state == OPEN) {
-          // check neighbor's g score
-          // determine whether to change its parent to current
           if (neighborPtr->g > curPtr->g + neighbor_dist) {
             neighborPtr->parent = curPtr;
             neighborPtr->g = curPtr->g + neighbor_dist;
@@ -641,6 +642,12 @@ class Env {
       }
       if (visited_nodes_.size() == MAX_MEMORY) {
         std::cout << "[astar search] out of memory!" << std::endl;
+        break;
+      }
+      auto elapsed = std::chrono::duration<double>(std::chrono::steady_clock::now() - t_astar_start).count();
+      if (elapsed > MAX_DURATION) {
+        std::cout << "[astar search] timeout (" << elapsed << "s)!" << std::endl;
+        break;
       }
     }
     if (ret) {
@@ -778,7 +785,8 @@ class Env {
     calulateHeuristic(curPtr);
     curPtr->state = CLOSE;
 
-    while (visited_nodes_.size() < MAX_MEMORY) {
+    auto t_short_start = std::chrono::steady_clock::now();
+    while (visited_nodes_.size() < SHORT_MAX_MEMORY) {
       for (const auto& neighbor : neighbors) {
         auto neighbor_idx = curPtr->idx + neighbor.first;
         auto neighbor_dist = neighbor.second;
@@ -814,8 +822,14 @@ class Env {
         ret = true;
         break;
       }
-      if (visited_nodes_.size() == MAX_MEMORY) {
+      if (visited_nodes_.size() == SHORT_MAX_MEMORY) {
         std::cout << "[short astar] out of memory!" << std::endl;
+        break;
+      }
+      auto elapsed = std::chrono::duration<double>(std::chrono::steady_clock::now() - t_short_start).count();
+      if (elapsed > SHORT_MAX_DURATION) {
+        std::cout << "[short astar] timeout!" << std::endl;
+        break;
       }
     }
     if (ret) {
@@ -842,9 +856,11 @@ class Env {
       }
       if (!checkRayValid(p0, p1, 1.5)) {
         short_path.clear();
-        short_astar(p0, p1, short_path);
-        for (const auto& p : short_path) {
-          path.push_back(p);
+        bool found = short_astar(p0, p1, short_path);
+        if (found) {
+          for (const auto& p : short_path) {
+            path.push_back(p);
+          }
         }
       }
       path.push_back(p1);

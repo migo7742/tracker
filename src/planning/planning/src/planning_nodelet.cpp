@@ -68,6 +68,9 @@ class PlanningNode : public rclcpp::Node {
   int traj_id_ = 0;
   bool wait_hover_ = true;
   bool force_hover_ = true;
+  rclcpp::Time force_hover_start_{0, 0, RCL_ROS_TIME};
+  int consecutive_replan_failures_ = 0;
+  static constexpr int MAX_CONSECUTIVE_FAILURES = 15;
 
   nav_msgs::msg::Odometry odom_msg_, target_msg_;
   quadrotor_msgs::msg::OccMap3d map_msg_;
@@ -80,13 +83,15 @@ class PlanningNode : public rclcpp::Node {
   std::atomic_bool target_received_ = ATOMIC_VAR_INIT(false);
   std::atomic_bool land_triger_received_ = ATOMIC_VAR_INIT(false);
 
+  static constexpr double MIN_HOVER_Z = 1.0;  // ~1.45m above ground in world frame
+
   void pub_hover_p(const Eigen::Vector3d& hover_p, const rclcpp::Time& stamp) {
     quadrotor_msgs::msg::PolyTraj traj_msg;
     traj_msg.hover = true;
     traj_msg.hover_p.resize(3);
-    for (int i = 0; i < 3; ++i) {
-      traj_msg.hover_p[i] = hover_p[i];
-    }
+    traj_msg.hover_p[0] = hover_p[0];
+    traj_msg.hover_p[1] = hover_p[1];
+    traj_msg.hover_p[2] = std::max(hover_p[2], MIN_HOVER_Z);
     traj_msg.start_time = stamp;
     traj_msg.traj_id = traj_id_++;
     traj_pub_->publish(traj_msg);
@@ -185,9 +190,13 @@ class PlanningNode : public rclcpp::Node {
                               odom_msg.pose.pose.orientation.y,
                               odom_msg.pose.pose.orientation.z);
     if (!triger_received_) {
+      RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 3000,
+        "[planner] Waiting for trigger (publish PoseStamped to /triger)");
       return;
     }
     if (!target_received_) {
+      RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 3000,
+        "[planner] Waiting for target EKF data");
       return;
     }
     // NOTE obtain state of target
@@ -197,13 +206,14 @@ class PlanningNode : public rclcpp::Node {
     target_lock_.clear();
 
     double target_age = (this->now() - rclcpp::Time(replanStateMsg_.target.header.stamp)).seconds();
-    if (target_age > 1.0) {
+      if (target_age > 1.0) {
       if (!wait_hover_) {
         pub_hover_p(Eigen::Vector3d(odom_msg.pose.pose.position.x,
                                      odom_msg.pose.pose.position.y,
                                      odom_msg.pose.pose.position.z), this->now());
         wait_hover_ = true;
         force_hover_ = true;
+        force_hover_start_ = this->now();
       }
       RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 2000,
         "[planner] target data stale (%.1fs), hovering...", target_age);
@@ -222,13 +232,41 @@ class PlanningNode : public rclcpp::Node {
     target_q.y() = replanStateMsg_.target.pose.pose.orientation.y;
     target_q.z() = replanStateMsg_.target.pose.pose.orientation.z;
 
+    // Sanity check: reject clearly invalid target estimates (EKF drift)
+    {
+      double target_z_in_world = target_p.z() + 0.45;
+      bool z_invalid = target_z_in_world < -0.3 || target_z_in_world > 4.0;
+      double xy_dist_raw = (target_p - odom_p).head(2).norm();
+      bool dist_invalid = xy_dist_raw > tracking_dist_ * 2.5;
+      if (z_invalid || dist_invalid) {
+        if (!wait_hover_) {
+          pub_hover_p(odom_p, this->now());
+          wait_hover_ = true;
+          force_hover_ = true;
+          force_hover_start_ = this->now();
+        }
+        RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 1000,
+          "[planner] target estimate unreasonable (z_world=%.2f, xy_dist=%.2f, limit=%.1f), hovering",
+          target_z_in_world, xy_dist_raw, tracking_dist_ * 2.5);
+        return;
+      }
+    }
+
     // NOTE force-hover: waiting for the speed of drone small enough
-    if (force_hover_ && odom_v.norm() > 0.1) {
-      return;
+    if (force_hover_) {
+      double hover_elapsed = (this->now() - force_hover_start_).seconds();
+      if (odom_v.norm() > 0.3 && hover_elapsed < 3.0) {
+        RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 1000,
+          "[planner] force_hover: waiting velocity settle (v=%.2f, elapsed=%.1fs)", odom_v.norm(), hover_elapsed);
+        return;
+      }
+      if (hover_elapsed >= 3.0) {
+        RCLCPP_WARN(this->get_logger(), "[planner] force_hover timeout (%.1fs), resuming planning", hover_elapsed);
+        force_hover_ = false;
+      }
     }
 
     // Safety: clamp target EKF position so it can't be closer than a minimum
-    // This protects against depth estimation errors that report target "inside" the drone
     {
       Eigen::Vector2d dp_xy = (target_p - odom_p).head(2);
       double xy_dist = dp_xy.norm();
@@ -263,18 +301,38 @@ class PlanningNode : public rclcpp::Node {
       double desired_yaw = std::atan2(dp.y(), dp.x());
       Eigen::Vector3d project_yaw = odom_q.toRotationMatrix().col(0);  // NOTE ZYX
       double now_yaw = std::atan2(project_yaw.y(), project_yaw.x());
-      if (std::fabs((target_p - odom_p).norm() - tracking_dist_) < tolerance_d_ &&
-          odom_v.norm() < 0.1 && target_v.norm() < 0.2 &&
-          std::fabs(desired_yaw - now_yaw) < 0.5) {
+      double dist_err = std::fabs(dp.norm() - tracking_dist_);
+      double yaw_err = std::fabs(desired_yaw - now_yaw);
+      if (yaw_err > M_PI) yaw_err = 2 * M_PI - yaw_err;
+
+      double enter_dist_thr = tolerance_d_;
+      double exit_dist_thr = tolerance_d_ * 2.5;
+      double enter_yaw_thr = 1.0;
+      double exit_yaw_thr = 1.8;
+
+      bool should_hover;
+      if (wait_hover_) {
+        should_hover = (dist_err < exit_dist_thr) && (yaw_err < exit_yaw_thr);
+      } else {
+        should_hover = (dist_err < enter_dist_thr) && (yaw_err < enter_yaw_thr);
+      }
+
+      if (should_hover) {
         if (!wait_hover_) {
           pub_hover_p(odom_p, this->now());
           wait_hover_ = true;
+          RCLCPP_WARN(this->get_logger(),
+            "[planner] HOVERING (dist_err=%.2f, yaw_err=%.2f, v=%.2f)", dist_err, yaw_err, odom_v.norm());
         }
-        RCLCPP_WARN(this->get_logger(), "[planner] HOVERING...");
         replanStateMsg_.state = -1;
         replanState_pub_->publish(replanStateMsg_);
         return;
       } else {
+        if (wait_hover_) {
+          RCLCPP_WARN(this->get_logger(),
+            "[planner] Leaving hover (dist_err=%.2f/%.2f, yaw_err=%.2f/%.2f)",
+            dist_err, exit_dist_thr, yaw_err, exit_yaw_thr);
+        }
         wait_hover_ = false;
       }
     }
@@ -316,9 +374,18 @@ class PlanningNode : public rclcpp::Node {
       iniState.col(0) = odom_p;
       iniState.col(1) = odom_v;
     } else {
-      iniState.col(0) = traj_poly_.getPos(replan_t);
-      iniState.col(1) = traj_poly_.getVel(replan_t);
-      iniState.col(2) = traj_poly_.getAcc(replan_t);
+      Eigen::Vector3d traj_p = traj_poly_.getPos(replan_t);
+      double tracking_err = (traj_p - odom_p).norm();
+      if (tracking_err > 0.8) {
+        iniState.col(0) = odom_p;
+        iniState.col(1) = odom_v;
+        RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 1000,
+          "[planner] tracking error %.2fm, using odom for iniState", tracking_err);
+      } else {
+        iniState.col(0) = traj_p;
+        iniState.col(1) = traj_poly_.getVel(replan_t);
+        iniState.col(2) = traj_poly_.getAcc(replan_t);
+      }
     }
     replanStateMsg_.header.stamp = this->now();
     replanStateMsg_.ini_state.resize(9);
@@ -413,6 +480,7 @@ class PlanningNode : public rclcpp::Node {
     }
     if (valid) {
       force_hover_ = false;
+      consecutive_replan_failures_ = 0;
       RCLCPP_WARN(this->get_logger(), "[planner] REPLAN SUCCESS");
       replanStateMsg_.state = 0;
       replanState_pub_->publish(replanStateMsg_);
@@ -434,10 +502,22 @@ class PlanningNode : public rclcpp::Node {
       RCLCPP_FATAL(this->get_logger(), "[planner] EMERGENCY STOP!!!");
       replanStateMsg_.state = 2;
       replanState_pub_->publish(replanStateMsg_);
+      force_hover_start_ = this->now();
       pub_hover_p(iniState.col(0), replan_stamp);
       return;
     } else {
-      RCLCPP_ERROR(this->get_logger(), "[planner] REPLAN FAILED, EXECUTE LAST TRAJ...");
+      consecutive_replan_failures_++;
+      if (consecutive_replan_failures_ >= MAX_CONSECUTIVE_FAILURES) {
+        force_hover_ = true;
+        force_hover_start_ = this->now();
+        consecutive_replan_failures_ = 0;
+        pub_hover_p(odom_p, this->now());
+        RCLCPP_ERROR(this->get_logger(),
+          "[planner] %d consecutive failures, force hovering at current pos", MAX_CONSECUTIVE_FAILURES);
+        return;
+      }
+      RCLCPP_ERROR(this->get_logger(), "[planner] REPLAN FAILED, EXECUTE LAST TRAJ... (%d/%d)",
+        consecutive_replan_failures_, MAX_CONSECUTIVE_FAILURES);
       replanStateMsg_.state = 3;
       replanState_pub_->publish(replanStateMsg_);
       return;
@@ -465,8 +545,14 @@ class PlanningNode : public rclcpp::Node {
       return;
     }
     // NOTE force-hover: waiting for the speed of drone small enough
-    if (force_hover_ && odom_v.norm() > 0.1) {
-      return;
+    if (force_hover_) {
+      double hover_elapsed = (this->now() - force_hover_start_).seconds();
+      if (odom_v.norm() > 0.3 && hover_elapsed < 3.0) {
+        return;
+      }
+      if (hover_elapsed >= 3.0) {
+        force_hover_ = false;
+      }
     }
 
     // NOTE local goal
@@ -612,6 +698,7 @@ class PlanningNode : public rclcpp::Node {
       return;
     } else if (!validcheck(traj_poly_, replan_stamp_)) {
       force_hover_ = true;
+      force_hover_start_ = this->now();
       RCLCPP_FATAL(this->get_logger(), "[planner] EMERGENCY STOP!!!");
       replanStateMsg_.state = 2;
       replanState_pub_->publish(replanStateMsg_);
@@ -823,9 +910,12 @@ class PlanningNode : public rclcpp::Node {
 
  public:
   PlanningNode(const rclcpp::NodeOptions& options) : Node("planning_nodelet", options) {
-      // Use a one-shot timer to defer initialization until the shared_ptr to this node is established.
-      // This is necessary because helper classes (Env, Predict, etc.) require a shared_ptr to the node.
       init_timer_ = this->create_wall_timer(0ms, std::bind(&PlanningNode::init, this));
+  }
+
+  ~PlanningNode() override {
+    if (plan_timer_) plan_timer_->cancel();
+    if (init_timer_) init_timer_->cancel();
   }
   
   EIGEN_MAKE_ALIGNED_OPERATOR_NEW

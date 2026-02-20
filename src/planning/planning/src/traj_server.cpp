@@ -47,6 +47,7 @@ private:
   quadrotor_msgs::msg::PolyTraj trajMsg_, trajMsg_last_;
   Eigen::Vector3d last_p_ = Eigen::Vector3d::Zero();
   double last_yaw_ = 0;
+  static constexpr double MIN_CMD_Z = 1.0;  // minimum Z in odom frame (~1.45m above ground)
 
   void publish_cmd(int traj_id,
                    const Eigen::Vector3d &p,
@@ -61,7 +62,7 @@ private:
 
     cmd.position.x = p(0);
     cmd.position.y = p(1);
-    cmd.position.z = p(2);
+    cmd.position.z = std::max(p(2), MIN_CMD_Z);
     cmd.velocity.x = v(0);
     cmd.velocity.y = v(1);
     cmd.velocity.z = v(2);
@@ -134,8 +135,8 @@ private:
       d_yaw = d_yaw >= M_PI ? d_yaw - 2 * M_PI : d_yaw;
       d_yaw = d_yaw <= -M_PI ? d_yaw + 2 * M_PI : d_yaw;
       double d_yaw_abs = fabs(d_yaw);
-      if (d_yaw_abs >= 0.02) {
-        yaw = last_yaw_ + d_yaw / d_yaw_abs * 0.02;
+      if (d_yaw_abs >= 0.01) {
+        yaw = last_yaw_ + d_yaw / d_yaw_abs * 0.01;
       }
       publish_cmd(trajMsg.traj_id, p, v, a, yaw, 0);  // TODO yaw
       last_yaw_ = yaw;
@@ -165,7 +166,7 @@ private:
     // Need to ensure heartbeat_time_ is initialized, otherwise (now - 0) is huge.
     if (heartbeat_time_.nanoseconds() > 0 && (time_now - heartbeat_time_).seconds() > 0.5) {
       RCLCPP_ERROR_ONCE(this->get_logger(), "[traj_server] Lost heartbeat from the planner, is he dead?");
-      publish_cmd(trajMsg_.traj_id, last_p_, Eigen::Vector3d::Zero(), Eigen::Vector3d::Zero(), 0, 0);  // TODO yaw
+      publish_cmd(trajMsg_.traj_id, last_p_, Eigen::Vector3d::Zero(), Eigen::Vector3d::Zero(), last_yaw_, 0);
       return;
     }
     if (exe_traj(trajMsg_)) {
@@ -174,6 +175,11 @@ private:
     } else if (exe_traj(trajMsg_last_)) {
       return;
     }
+    // Both trajectories expired — hold position at last known point
+    RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 2000,
+        "[traj_server] All trajectories expired, holding position");
+    publish_cmd(trajMsg_.traj_id, last_p_, Eigen::Vector3d::Zero(),
+                Eigen::Vector3d::Zero(), last_yaw_, 0);
   }
 };
 

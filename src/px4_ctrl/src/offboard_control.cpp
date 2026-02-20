@@ -105,6 +105,8 @@ private:
     bool planning_pos_command_received_ = false;
     bool takeoff_hover_des_set_ = false;
     bool offboard_hover_des_set_ = false;
+    rclcpp::Time last_planning_cmd_time_;
+    static constexpr double CMD_TIMEOUT_SEC = 0.5;
 
     px4_msgs::msg::TrajectorySetpoint hover_setpoint_;
 
@@ -130,6 +132,7 @@ private:
     void planning_pos_cmd_callback(const quadrotor_msgs::msg::PositionCommand::SharedPtr msg) {
         latest_planning_msg_ = *msg;
         planning_pos_command_received_ = true;
+        last_planning_cmd_time_ = this->now();
     }
     void mode_cmd_callback(const std_msgs::msg::String::SharedPtr msg) {
         control_mode_ = msg->data;
@@ -323,7 +326,7 @@ private:
             if (!offboard_hover_des_set_ && vehicle_local_position_received_) {
                 hover_setpoint_.position[0] = vehicle_local_position_.x;
                 hover_setpoint_.position[1] = vehicle_local_position_.y;
-                hover_setpoint_.position[2] = vehicle_local_position_.z;
+                hover_setpoint_.position[2] = std::min(vehicle_local_position_.z, -1.5f);  // NED: at least 1.5m up
                 hover_setpoint_.yaw = vehicle_local_position_.heading;
                 offboard_hover_des_set_ = true;
             }
@@ -331,7 +334,26 @@ private:
             return;
         }
         if (control_mode_ == "o" && planning_pos_command_received_) {
-            publish_offboard_control_heartbeat_signal(true); 
+            double cmd_age = (this->now() - last_planning_cmd_time_).seconds();
+            if (cmd_age > CMD_TIMEOUT_SEC) {
+                // Planning commands stale — fall back to position hold
+                publish_offboard_control_heartbeat_signal(false);
+            if (!offboard_hover_des_set_ && vehicle_local_position_received_) {
+                hover_setpoint_.position[0] = vehicle_local_position_.x;
+                hover_setpoint_.position[1] = vehicle_local_position_.y;
+                hover_setpoint_.position[2] = std::min(vehicle_local_position_.z, -1.5f);  // NED: at least 1.5m above ground
+                hover_setpoint_.yaw = vehicle_local_position_.heading;
+                offboard_hover_des_set_ = true;
+                RCLCPP_WARN(this->get_logger(), "Planning cmd timeout (%.2fs), holding position at z=%.2f",
+                    cmd_age, hover_setpoint_.position[2]);
+            }
+                if (offboard_hover_des_set_) {
+                    publish_position_setpoint(hover_setpoint_.position[0], hover_setpoint_.position[1],
+                                              hover_setpoint_.position[2], hover_setpoint_.yaw);
+                }
+                return;
+            }
+            publish_offboard_control_heartbeat_signal(true);
             if (nav_state_ != px4_msgs::msg::VehicleStatus::NAVIGATION_STATE_OFFBOARD) {
                 publish_vehicle_command(px4_msgs::msg::VehicleCommand::VEHICLE_CMD_DO_SET_MODE, 1.0, 6.0);
             }
