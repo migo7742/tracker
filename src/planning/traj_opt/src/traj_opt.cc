@@ -308,6 +308,7 @@ int TrajOpt::optimize(const double& delta) {
   lbfgs::lbfgs_load_default_parameters(&lbfgs_params);
   lbfgs_params.mem_size = 16;
   lbfgs_params.past = 3;
+  lbfgs_params.max_iterations = 200;
   lbfgs_params.g_epsilon = 1e-10;
   lbfgs_params.min_step = 1e-32;
   lbfgs_params.delta = delta;

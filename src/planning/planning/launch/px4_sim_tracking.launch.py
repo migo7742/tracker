@@ -201,7 +201,7 @@ def launch_setup(context):
                     'theta_clearance': 0.8,
                     'clearance_d': 0.2,
                     'tolerance_d': 1.0,
-                    'tracking_dist': 4.5,
+                    'tracking_dist': 3.5,
                     'tracking_dur': 3.0,
                     'tracking_dt': 0.2,
                     'debug': False,

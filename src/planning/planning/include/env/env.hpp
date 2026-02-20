@@ -57,9 +57,9 @@ class NodeComparator {
 
 class Env {
   static constexpr int MAX_MEMORY = 1 << 18;
-  static constexpr int SHORT_MAX_MEMORY = 1 << 14;  // 16384, enough for short-range
+  static constexpr int SHORT_MAX_MEMORY = 1 << 16;  // 65536
   static constexpr double MAX_DURATION = 0.2;
-  static constexpr double SHORT_MAX_DURATION = 0.05;
+  static constexpr double SHORT_MAX_DURATION = 0.1;
 
  private:
   // ROS 2 Members
