@@ -163,6 +163,8 @@ private:
   double target_real_height_;
   std::string target_class_;
   rclcpp::Time last_update_stamp_;
+  int consecutive_rejects_ = 0;
+  static constexpr int MAX_CONSECUTIVE_REJECTS = 10;
 
   void predict_state_callback() {
     double update_dt = (this->now() - last_update_stamp_).seconds();
@@ -239,6 +241,7 @@ private:
 
     double height = ymax - ymin;
     double depth = target_real_height_ / height * fy_;
+    depth = std::clamp(depth, 0.8, 15.0);
     double y = ((ymin + ymax) * 0.5 - cy_) * depth / fy_;
     double x = ((xmin + xmax) * 0.5 - cx_) * depth / fx_;
     Eigen::Vector3d p(x, y, depth);
@@ -257,11 +260,22 @@ private:
     double update_dt = (this->now() - last_update_stamp_).seconds();
     if (update_dt > 3.0) {
       ekfPtr_->reset(p);
-      RCLCPP_WARN(this->get_logger(), "ekf reset!");
+      consecutive_rejects_ = 0;
+      RCLCPP_WARN(this->get_logger(), "ekf reset (stale)!");
     } else if (ekfPtr_->checkValid(p)) {
       ekfPtr_->update(p);
+      consecutive_rejects_ = 0;
     } else {
-      RCLCPP_ERROR(this->get_logger(), "update invalid!");
+      consecutive_rejects_++;
+      if (consecutive_rejects_ >= MAX_CONSECUTIVE_REJECTS) {
+        ekfPtr_->reset(p);
+        consecutive_rejects_ = 0;
+        RCLCPP_WARN(this->get_logger(), "ekf reset (consecutive rejects=%d), pos=(%.2f,%.2f,%.2f)",
+            MAX_CONSECUTIVE_REJECTS, p.x(), p.y(), p.z());
+      } else {
+        RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 1000,
+            "update invalid! rejects=%d/%d", consecutive_rejects_, MAX_CONSECUTIVE_REJECTS);
+      }
       return;
     }
     last_update_stamp_ = this->now();

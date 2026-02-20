@@ -227,6 +227,21 @@ class PlanningNode : public rclcpp::Node {
       return;
     }
 
+    // Safety: clamp target EKF position so it can't be closer than a minimum
+    // This protects against depth estimation errors that report target "inside" the drone
+    {
+      Eigen::Vector2d dp_xy = (target_p - odom_p).head(2);
+      double xy_dist = dp_xy.norm();
+      double min_target_dist = tracking_dist_ * 0.4;
+      if (xy_dist < min_target_dist && xy_dist > 0.01) {
+        Eigen::Vector2d dir = dp_xy / xy_dist;
+        target_p.head(2) = odom_p.head(2) + dir * min_target_dist;
+        RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 1000,
+          "[planner] target est too close (xy=%.2f < %.2f), clamping outward",
+          xy_dist, min_target_dist);
+      }
+    }
+
     // NOTE just for landing on the car!
     if (land_triger_received_) {
       if (std::fabs((target_p - odom_p).norm() < 0.1 && odom_v.norm() < 0.1 && target_v.norm() < 0.2)) {
@@ -313,10 +328,12 @@ class PlanningNode : public rclcpp::Node {
     Eigen::Vector3d p_start = iniState.col(0);
     std::vector<Eigen::Vector3d> path, way_pts;
     RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 1000,
-      "[planner] drone=(%.2f,%.2f,%.2f) target=(%.2f,%.2f,%.2f) dist=%.2f",
+      "[planner] drone=(%.2f,%.2f,%.2f) target=(%.2f,%.2f,%.2f) dist3d=%.2f distXY=%.2f trackDist=%.2f",
       odom_p.x(), odom_p.y(), odom_p.z(),
       target_p.x(), target_p.y(), target_p.z(),
-      (odom_p - target_p).norm());
+      (odom_p - target_p).norm(),
+      (odom_p - target_p).head(2).norm(),
+      tracking_dist_);
     if (generate_new_traj_success) {
       if (land_triger_received_) {
         generate_new_traj_success = envPtr_->short_astar(p_start, target_p, path);

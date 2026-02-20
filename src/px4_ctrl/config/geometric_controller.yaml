@@ -1,0 +1,22 @@
+/**:
+  ros__parameters:
+    # 位置环比例增益 (Position Proportional Gains)
+    # 越高响应越快，但也越容易震荡
+    kp_x: 8.0
+    kp_y: 8.0
+    kp_z: 10.0
+
+    # 速度环微分增益 (Velocity Derivative Gains)
+    # 用于抑制震荡，相当于阻尼
+    kv_x: 3.0
+    kv_y: 3.0
+    kv_z: 5.0
+
+    # 关键参数：悬停油门 (0.0 ~ 1.0)
+    # 必须根据无人机实际情况调整！
+    # 仿真(Gazebo)通常在 0.5 - 0.6 之间
+    # 真实 F450 机架通常在 0.35 - 0.5 之间
+    hover_throttle: 0.6
+
+    # 重力加速度
+    grav_acc: 9.81

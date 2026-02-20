@@ -163,7 +163,7 @@ def launch_setup(context):
             color_cam_params,
             cam_transform,
             {
-                'pitch_thr': 10.0,
+                'pitch_thr': 2.0,
                 'ekf_rate': 20,
                 'target_class': target_class,
                 'target_real_height': 1.7,

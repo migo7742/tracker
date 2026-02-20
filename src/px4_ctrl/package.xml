@@ -1,0 +1,31 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <name>px4_ctrl</name>
+  <version>0.0.1</version>
+  <description>C++ Offboard Geometric Control Node for PX4</description>
+  <maintainer email="user@todo.todo">user</maintainer>
+  <license>MIT</license>
+
+  <buildtool_depend>ament_cmake</buildtool_depend>
+
+  <!-- 编译和运行依赖 -->
+  <depend>rclcpp</depend>
+  <depend>px4_msgs</depend>
+  <depend>quadrotor_msgs</depend>
+  <depend>std_msgs</depend>
+  
+  <!-- Eigen 依赖: 推荐添加 eigen3_cmake_module 以便 CMake 更好地找到它 -->
+  <build_depend>eigen3_cmake_module</build_depend>
+  <depend>libeigen-dev</depend>
+
+  <!-- [建议] 添加 Launch 依赖 -->
+  <exec_depend>ros2launch</exec_depend>
+
+  <test_depend>ament_lint_auto</test_depend>
+  <test_depend>ament_lint_common</test_depend>
+
+  <export>
+    <build_type>ament_cmake</build_type>
+  </export>
+</package>
