@@ -68,6 +68,7 @@ class PlanningNode : public rclcpp::Node {
   int traj_id_ = 0;
   bool wait_hover_ = true;
   bool force_hover_ = true;
+  Eigen::Vector3d hover_pos_ = Eigen::Vector3d::Zero();
   rclcpp::Time force_hover_start_{0, 0, RCL_ROS_TIME};
   int consecutive_replan_failures_ = 0;
   static constexpr int MAX_CONSECUTIVE_FAILURES = 15;
@@ -84,8 +85,29 @@ class PlanningNode : public rclcpp::Node {
   std::atomic_bool land_triger_received_ = ATOMIC_VAR_INIT(false);
 
   static constexpr double MIN_HOVER_Z = 1.0;  // ~1.45m above ground in world frame
+  // Z offset added to target for all planning computations.
+  // Original design: target_p.z += offset once, then used consistently
+  // for prediction, path search, corridor, and traj_opt.
+  // This makes the drone fly ~1m above the ground target.
+  static constexpr double TRACKING_Z_OFFSET = 1.0;
 
-  void pub_hover_p(const Eigen::Vector3d& hover_p, const rclcpp::Time& stamp) {
+  // Compute a safe hover point ahead of current position in the velocity direction
+  // to avoid abrupt stops. The drone will decelerate naturally to this point.
+  Eigen::Vector3d compute_brake_point(const Eigen::Vector3d& pos, const Eigen::Vector3d& vel) {
+    double speed = vel.norm();
+    if (speed < 0.3) {
+      // Already slow enough, hover at current position
+      return pos;
+    }
+    // Estimate braking distance: v² / (2*a), use amax=1.5
+    double brake_dist = speed * speed / (2.0 * 1.5);
+    brake_dist = std::min(brake_dist, 2.0);  // cap at 2m
+    Eigen::Vector3d brake_p = pos + vel.normalized() * brake_dist;
+    brake_p.z() = std::max(brake_p.z(), MIN_HOVER_Z);
+    return brake_p;
+  }
+
+  void pub_hover_p(const Eigen::Vector3d& hover_p, const rclcpp::Time& stamp, double yaw = NAN) {
     quadrotor_msgs::msg::PolyTraj traj_msg;
     traj_msg.hover = true;
     traj_msg.hover_p.resize(3);
@@ -94,6 +116,7 @@ class PlanningNode : public rclcpp::Node {
     traj_msg.hover_p[2] = std::max(hover_p[2], MIN_HOVER_Z);
     traj_msg.start_time = stamp;
     traj_msg.traj_id = traj_id_++;
+    traj_msg.yaw = std::isnan(yaw) ? 0.0f : static_cast<float>(yaw);
     traj_pub_->publish(traj_msg);
   }
   
@@ -154,6 +177,13 @@ class PlanningNode : public rclcpp::Node {
     target_msg_ = *msgPtr;
     target_received_ = true;
     target_lock_.clear();
+    // Auto-trigger: once we have target data, start planning automatically
+    if (!triger_received_) {
+      goal_ << msgPtr->pose.pose.position.x, msgPtr->pose.pose.position.y, 0.9;
+      triger_received_ = true;
+      RCLCPP_INFO(this->get_logger(), "[planner] Auto-triggered by target data (goal=%.2f, %.2f, %.2f)",
+                  goal_.x(), goal_.y(), goal_.z());
+    }
   }
 
   void gridmap_callback(const quadrotor_msgs::msg::OccMap3d::ConstSharedPtr msgPtr) {
@@ -206,11 +236,10 @@ class PlanningNode : public rclcpp::Node {
     target_lock_.clear();
 
     double target_age = (this->now() - rclcpp::Time(replanStateMsg_.target.header.stamp)).seconds();
-      if (target_age > 1.0) {
+      if (target_age > 10.0) {
       if (!wait_hover_) {
-        pub_hover_p(Eigen::Vector3d(odom_msg.pose.pose.position.x,
-                                     odom_msg.pose.pose.position.y,
-                                     odom_msg.pose.pose.position.z), this->now());
+        Eigen::Vector3d brake_p = compute_brake_point(odom_p, odom_v);
+        pub_hover_p(brake_p, this->now());
         wait_hover_ = true;
         force_hover_ = true;
         force_hover_start_ = this->now();
@@ -240,7 +269,8 @@ class PlanningNode : public rclcpp::Node {
       bool dist_invalid = xy_dist_raw > tracking_dist_ * 2.5;
       if (z_invalid || dist_invalid) {
         if (!wait_hover_) {
-          pub_hover_p(odom_p, this->now());
+          Eigen::Vector3d brake_p = compute_brake_point(odom_p, odom_v);
+          pub_hover_p(brake_p, this->now());
           wait_hover_ = true;
           force_hover_ = true;
           force_hover_start_ = this->now();
@@ -294,14 +324,15 @@ class PlanningNode : public rclcpp::Node {
       target_p = target_p + target_q * land_p_;
       wait_hover_ = false;
     } else {
-      target_p.z() += 1.0;
+      // Compute desired tracking height offset for traj_opt (drone should fly above target)
+      target_p.z() += TRACKING_Z_OFFSET;
       // NOTE determin whether to replan
       Eigen::Vector3d dp = target_p - odom_p;
       // std::cout << "dist : " << dp.norm() << std::endl;
       double desired_yaw = std::atan2(dp.y(), dp.x());
       Eigen::Vector3d project_yaw = odom_q.toRotationMatrix().col(0);  // NOTE ZYX
       double now_yaw = std::atan2(project_yaw.y(), project_yaw.x());
-      double dist_err = std::fabs(dp.norm() - tracking_dist_);
+      double dist_err = std::fabs(dp.head(2).norm() - tracking_dist_);
       double yaw_err = std::fabs(desired_yaw - now_yaw);
       if (yaw_err > M_PI) yaw_err = 2 * M_PI - yaw_err;
 
@@ -314,15 +345,22 @@ class PlanningNode : public rclcpp::Node {
       if (wait_hover_) {
         should_hover = (dist_err < exit_dist_thr) && (yaw_err < exit_yaw_thr);
       } else {
-        should_hover = (dist_err < enter_dist_thr) && (yaw_err < enter_yaw_thr);
+        // Don't enter hover while still moving fast — let the trajectory
+        // decelerate naturally first to avoid abrupt stops
+        should_hover = (dist_err < enter_dist_thr) && (yaw_err < enter_yaw_thr)
+                       && (odom_v.norm() < 0.5);
       }
 
       if (should_hover) {
         if (!wait_hover_) {
-          pub_hover_p(odom_p, this->now());
+          hover_pos_ = odom_p;  // Lock hover position on entry
+          pub_hover_p(hover_pos_, this->now(), desired_yaw);
           wait_hover_ = true;
           RCLCPP_WARN(this->get_logger(),
             "[planner] HOVERING (dist_err=%.2f, yaw_err=%.2f, v=%.2f)", dist_err, yaw_err, odom_v.norm());
+        } else {
+          // Only update yaw while hovering, keep position locked
+          pub_hover_p(hover_pos_, this->now(), desired_yaw);
         }
         replanStateMsg_.state = -1;
         replanState_pub_->publish(replanStateMsg_);
@@ -335,6 +373,9 @@ class PlanningNode : public rclcpp::Node {
         }
         wait_hover_ = false;
       }
+
+      // target_p.z now has TRACKING_Z_OFFSET applied.
+      // All downstream (prediction, path, corridor, traj_opt) use this consistently.
     }
 
     // NOTE obtain map
@@ -353,9 +394,23 @@ class PlanningNode : public rclcpp::Node {
     }
 
     // NOTE prediction
+    // target_p.z already has TRACKING_Z_OFFSET applied — use it directly
+    // for prediction, path search, corridor, and traj_opt (all at same z).
     std::vector<Eigen::Vector3d> target_predcit;
     bool generate_new_traj_success = prePtr_->predict(target_p, target_v, target_predcit);
-    if (generate_new_traj_success) {
+    if (!generate_new_traj_success) {
+      // Fallback: constant-velocity linear prediction when search-based prediction fails
+      RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 1000,
+        "[planner] prediction search failed, using linear fallback");
+      target_predcit.clear();
+      double dt = 0.2;  // tracking_dt
+      double dur = 3.0; // tracking_dur
+      for (double t = 0; t <= dur + 1e-6; t += dt) {
+        target_predcit.push_back(target_p + target_v * t);
+      }
+      generate_new_traj_success = true;
+    }
+    {
       Eigen::Vector3d observable_p = target_predcit.back();
       visPtr_->visualize_path(target_predcit, "car_predict");
       std::vector<Eigen::Vector3d> observable_margin;
@@ -387,6 +442,14 @@ class PlanningNode : public rclcpp::Node {
         iniState.col(2) = traj_poly_.getAcc(replan_t);
       }
     }
+    // Clamp iniState z to minimum flight altitude to break the low-z feedback loop:
+    // if drone is below MIN_HOVER_Z, start replanning from MIN_HOVER_Z so the new
+    // trajectory pulls the drone back up instead of staying at the low altitude.
+    if (iniState.col(0).z() < MIN_HOVER_Z) {
+      RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 1000,
+        "[planner] iniState.z=%.2f < MIN_HOVER_Z=%.1f, clamping up", iniState.col(0).z(), MIN_HOVER_Z);
+      iniState.col(0).z() = MIN_HOVER_Z;
+    }
     replanStateMsg_.header.stamp = this->now();
     replanStateMsg_.ini_state.resize(9);
     Eigen::Map<Eigen::MatrixXd>(replanStateMsg_.ini_state.data(), 3, 3) = iniState;
@@ -413,6 +476,10 @@ class PlanningNode : public rclcpp::Node {
     std::vector<double> thetas;
     Trajectory traj;
     if (generate_new_traj_success) {
+      // Clamp all path z values to MIN_HOVER_Z to prevent low-altitude corridors
+      for (auto& pt : path) {
+        if (pt.z() < MIN_HOVER_Z) pt.z() = MIN_HOVER_Z;
+      }
       RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 1000,
         "[planner] path: start=(%.2f,%.2f,%.2f) end=(%.2f,%.2f,%.2f) pts=%zu",
         path.front().x(), path.front().y(), path.front().z(),
@@ -438,8 +505,12 @@ class PlanningNode : public rclcpp::Node {
         }
         visPtr_->visualize_pointcloud(way_pts, "way_pts");
         way_pts.insert(way_pts.begin(), p_start);
-        envPtr_->pts2path(way_pts, path);
+        if (!envPtr_->pts2path(way_pts, path)) {
+          generate_new_traj_success = false;
+        }
       }
+    }
+    if (generate_new_traj_success) {
       // NOTE corridor generating
       std::vector<Eigen::MatrixXd> hPolys;
       std::vector<std::pair<Eigen::Vector3d, Eigen::Vector3d>> keyPts;
@@ -458,6 +529,8 @@ class PlanningNode : public rclcpp::Node {
         "[planner] finState=(%.2f,%.2f,%.2f) corridors=%zu",
         finState.col(0).x(), finState.col(0).y(), finState.col(0).z(),
         hPolys.size());
+      // target_predcit z is already at correct height (original + TRACKING_Z_OFFSET)
+      // consistent with path and corridor — no modification needed
       if (land_triger_received_) {
         finState.col(0) = target_predcit.back();
         generate_new_traj_success = trajOptPtr_->generate_traj(iniState, finState, target_predcit, hPolys, traj);
@@ -503,7 +576,9 @@ class PlanningNode : public rclcpp::Node {
       replanStateMsg_.state = 2;
       replanState_pub_->publish(replanStateMsg_);
       force_hover_start_ = this->now();
-      pub_hover_p(iniState.col(0), replan_stamp);
+      // Use brake point instead of current position to avoid abrupt stop
+      Eigen::Vector3d brake_p = compute_brake_point(odom_p, odom_v);
+      pub_hover_p(brake_p, replan_stamp);
       return;
     } else {
       consecutive_replan_failures_++;
@@ -511,9 +586,11 @@ class PlanningNode : public rclcpp::Node {
         force_hover_ = true;
         force_hover_start_ = this->now();
         consecutive_replan_failures_ = 0;
-        pub_hover_p(odom_p, this->now());
+        // Use brake point instead of current position to avoid abrupt stop
+        Eigen::Vector3d brake_p = compute_brake_point(odom_p, odom_v);
+        pub_hover_p(brake_p, this->now());
         RCLCPP_ERROR(this->get_logger(),
-          "[planner] %d consecutive failures, force hovering at current pos", MAX_CONSECUTIVE_FAILURES);
+          "[planner] %d consecutive failures, force hovering at brake point (v=%.2f)", MAX_CONSECUTIVE_FAILURES, odom_v.norm());
         return;
       }
       RCLCPP_ERROR(this->get_logger(), "[planner] REPLAN FAILED, EXECUTE LAST TRAJ... (%d/%d)",
@@ -702,7 +779,8 @@ class PlanningNode : public rclcpp::Node {
       RCLCPP_FATAL(this->get_logger(), "[planner] EMERGENCY STOP!!!");
       replanStateMsg_.state = 2;
       replanState_pub_->publish(replanStateMsg_);
-      pub_hover_p(iniState.col(0), replan_stamp);
+      Eigen::Vector3d brake_p = compute_brake_point(odom_p, odom_v);
+      pub_hover_p(brake_p, replan_stamp);
       return;
     } else {
       RCLCPP_ERROR(this->get_logger(), "[planner] REPLAN FAILED, EXECUTE LAST TRAJ...");

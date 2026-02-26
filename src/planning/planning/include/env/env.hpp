@@ -322,6 +322,7 @@ class Env {
     keyPts.clear();
 
     while (idx < path_len - 1) {
+      int prev_idx = idx;  // dead-loop guard
       int next_idx = idx;
       // looking forward -> get a farest next_idx
       while (next_idx + 1 < path_len && checkRayValid(path[idx], path[next_idx + 1], bbox_width)) {
@@ -341,6 +342,13 @@ class Env {
       // find a farest idx in current corridor
       idx = next_idx;
       while (idx + 1 < path_len && decompPolys.back().inside(path[idx + 1])) {
+        idx++;
+      }
+
+      // dead-loop guard: if idx didn't advance, force skip to next point
+      if (idx == prev_idx) {
+        std::cout << "[generateSFC] idx stuck at " << idx
+                  << ", forcing advance to avoid infinite loop" << std::endl;
         idx++;
       }
     }
@@ -842,8 +850,9 @@ class Env {
     return ret;
   }
 
-  // ... [pts2path implementation remains unchanged] ...
-  inline void pts2path(const std::vector<Eigen::Vector3d>& wayPts, std::vector<Eigen::Vector3d>& path) {
+  // pts2path: returns false if any short_astar segment fails (prevents
+  // generateSFC from receiving a path that jumps through obstacles)
+  inline bool pts2path(const std::vector<Eigen::Vector3d>& wayPts, std::vector<Eigen::Vector3d>& path) {
     path.clear();
     path.push_back(wayPts.front());
     int M = wayPts.size();
@@ -861,6 +870,10 @@ class Env {
           for (const auto& p : short_path) {
             path.push_back(p);
           }
+        } else {
+          std::cout << "[pts2path] short_astar failed between segment " << i
+                    << ", aborting path construction" << std::endl;
+          return false;
         }
       }
       path.push_back(p1);
@@ -870,6 +883,7 @@ class Env {
       p.z() += 0.1;
       path.push_back(p);
     }
+    return true;
   }
 };
 

@@ -652,11 +652,24 @@ bool TrajOpt::grad_cost_p_tracking(const Eigen::Vector3d& p,
       ret = true;
     }
   }
-  pen = dz2 - tolerance_d_ * tolerance_d_;
+  // Z tracking: use a much tighter tolerance (0.3m) so drone stays near target_z
+  double z_tolerance = 0.3;
+  pen = dz2 - z_tolerance * z_tolerance;
   if (pen > 0) {
     double pen2 = pen * pen;
     gradp.z() += 6 * pen2 * dp.z();
     costp += pen * pen2;
+    ret = true;
+  }
+
+  // Hard floor constraint: penalize going below MIN_FLIGHT_Z (odom frame)
+  // This prevents the optimizer from finding low-z trajectories
+  static constexpr double MIN_FLIGHT_Z = 1.0;  // odom frame, ~1.45m above ground
+  double floor_pen = MIN_FLIGHT_Z - p.z();
+  if (floor_pen > 0) {
+    double fp2 = floor_pen * floor_pen;
+    gradp.z() -= 6 * fp2;  // push z upward
+    costp += fp2 * floor_pen;
     ret = true;
   }
 

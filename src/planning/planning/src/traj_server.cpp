@@ -65,10 +65,12 @@ private:
     cmd.position.z = std::max(p(2), MIN_CMD_Z);
     cmd.velocity.x = v(0);
     cmd.velocity.y = v(1);
-    cmd.velocity.z = v(2);
+    // If position was clamped up, don't command downward velocity
+    cmd.velocity.z = (p(2) < MIN_CMD_Z && v(2) < 0) ? 0.0 : v(2);
     cmd.acceleration.x = a(0);
     cmd.acceleration.y = a(1);
-    cmd.acceleration.z = a(2);
+    // If position was clamped up, don't command downward acceleration
+    cmd.acceleration.z = (p(2) < MIN_CMD_Z && a(2) < 0) ? 0.0 : a(2);
     cmd.yaw = y;
     cmd.yaw_dot = yd;
     pos_cmd_pub_->publish(cmd);
@@ -90,7 +92,17 @@ private:
         p.y() = trajMsg.hover_p[1];
         p.z() = trajMsg.hover_p[2];
         v0.setZero();
-        publish_cmd(trajMsg.traj_id, p, v0, v0, last_yaw_, 0);  // TODO yaw
+        // Use yaw from message so planner can update yaw while hovering
+        double yaw = static_cast<double>(trajMsg.yaw);
+        double d_yaw = yaw - last_yaw_;
+        d_yaw = d_yaw >= M_PI ? d_yaw - 2 * M_PI : d_yaw;
+        d_yaw = d_yaw <= -M_PI ? d_yaw + 2 * M_PI : d_yaw;
+        double d_yaw_abs = fabs(d_yaw);
+        if (d_yaw_abs >= 0.01) {
+          yaw = last_yaw_ + d_yaw / d_yaw_abs * 0.01;
+        }
+        publish_cmd(trajMsg.traj_id, p, v0, v0, yaw, 0);
+        last_yaw_ = yaw;
         return true;
       }
       if (trajMsg.order != 5) {

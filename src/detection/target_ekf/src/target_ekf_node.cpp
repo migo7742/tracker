@@ -168,10 +168,10 @@ private:
 
   void predict_state_callback() {
     double update_dt = (this->now() - last_update_stamp_).seconds();
-    if (update_dt < 5.0) {
+    if (update_dt < 15.0) {
       ekfPtr_->predict();
     } else {
-      RCLCPP_WARN(this->get_logger(), "too long time no update!");
+      RCLCPP_WARN(this->get_logger(), "too long time no update! (%.1fs)", update_dt);
       return;
     }
 
@@ -258,7 +258,7 @@ private:
     yolo_odom_pub_->publish(yolo_odom);
 
     double update_dt = (this->now() - last_update_stamp_).seconds();
-    if (update_dt > 6.0) {
+    if (update_dt > 16.0) {
       ekfPtr_->reset(p);
       consecutive_rejects_ = 0;
       RCLCPP_WARN(this->get_logger(), "ekf reset (stale, dt=%.1fs)!", update_dt);
