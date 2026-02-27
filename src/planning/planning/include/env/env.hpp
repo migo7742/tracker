@@ -56,10 +56,10 @@ class NodeComparator {
 };
 
 class Env {
-  static constexpr int MAX_MEMORY = 1 << 18;
-  static constexpr int SHORT_MAX_MEMORY = 1 << 16;  // 65536
-  static constexpr double MAX_DURATION = 0.2;
-  static constexpr double SHORT_MAX_DURATION = 0.1;
+  static constexpr int MAX_MEMORY = 1 << 20;        // 1048576 (~80MB)
+  static constexpr int SHORT_MAX_MEMORY = 1 << 18;  // 262144
+  static constexpr double MAX_DURATION = 0.5;
+  static constexpr double SHORT_MAX_DURATION = 0.4;  // was 0.2, increased for dense environments
 
  private:
   // ROS 2 Members
@@ -370,7 +370,7 @@ class Env {
     Eigen::Vector3d interior;
     std::vector<int> inflate(hPolys.size(), 0);
     for (int i = 0; i < (int)hPolys.size(); i++) {
-      if (geoutils::findInteriorDist(current_poly, interior) < 0.1) {
+      if (geoutils::findInteriorDist(hPolys[i], interior) < 0.1) {
         inflate[i] = 1;
       } else {
         compressPoly(hPolys[i], 0.1);
@@ -456,6 +456,15 @@ class Env {
       Eigen::Vector3i dp = end_idx - ptr->idx;
       double dr = dp.head(2).norm();
       double lambda = 1.0 - stop_dist / std::max(dr, 1e-6);
+      // When lambda < 0 (drone is inside the tracking circle), the standard
+      // heuristic collapses (h≈0) and A* degenerates into Dijkstra, searching
+      // in all directions equally. This causes it to find points BEHIND the
+      // drone, leading to "path direction reversed".
+      // Fix: when inside the circle, clamp lambda to 0 so the heuristic still
+      // guides toward the target (the closest ring point is in the target
+      // direction). The stopCondition (h < tolerance && rayValid) will find
+      // the correct ring point.
+      if (lambda < 0) lambda = 0;
       double dx = lambda * dp.x();
       double dy = lambda * dp.y();
       double dz = dp.z();
@@ -468,12 +477,15 @@ class Env {
     // initialization of datastructures
     std::priority_queue<NodePtr, std::vector<NodePtr>, NodeComparator> open_set;
     std::vector<std::pair<Eigen::Vector3i, double>> neighbors;
+    // NOTE 6-connected graph (matching original project).
+    // 26-connected causes search instability when heuristic is weak (near target),
+    // leading to "path direction reversed" — the search finds points behind the drone.
     for (int i = 0; i < 3; ++i) {
-      Eigen::Vector3i nb(0, 0, 0);
-      nb[i] = 1;
-      neighbors.emplace_back(nb, 1.0);
-      nb[i] = -1;
-      neighbors.emplace_back(nb, 1.0);
+      Eigen::Vector3i neighbor(0, 0, 0);
+      neighbor[i] = 1;
+      neighbors.emplace_back(neighbor, 1);
+      neighbor[i] = -1;
+      neighbors.emplace_back(neighbor, 1);
     }
     bool ret = false;
     NodePtr curPtr = visit(start_idx);
@@ -594,13 +606,14 @@ class Env {
     // initialization of datastructures
     std::priority_queue<NodePtr, std::vector<NodePtr>, NodeComparator> open_set;
     std::vector<std::pair<Eigen::Vector3i, double>> neighbors;
-    for (int i = 0; i < 3; ++i) {
-      Eigen::Vector3i nb(0, 0, 0);
-      nb[i] = 1;
-      neighbors.emplace_back(nb, 1.0);
-      nb[i] = -1;
-      neighbors.emplace_back(nb, 1.0);
-    }
+    // 26-connected graph for better diagonal movement
+    for (int dx = -1; dx <= 1; ++dx)
+      for (int dy = -1; dy <= 1; ++dy)
+        for (int dz = -1; dz <= 1; ++dz) {
+          if (dx == 0 && dy == 0 && dz == 0) continue;
+          Eigen::Vector3i nb(dx, dy, dz);
+          neighbors.emplace_back(nb, nb.cast<double>().norm());
+        }
     bool ret = false;
     NodePtr curPtr = visit(start_idx);
     if (!curPtr->valid) {
@@ -776,13 +789,14 @@ class Env {
     // initialization of datastructures
     std::priority_queue<NodePtr, std::vector<NodePtr>, NodeComparator> open_set;
     std::vector<std::pair<Eigen::Vector3i, double>> neighbors;
-    for (int i = 0; i < 3; ++i) {
-      Eigen::Vector3i nb(0, 0, 0);
-      nb[i] = 1;
-      neighbors.emplace_back(nb, 1.0);
-      nb[i] = -1;
-      neighbors.emplace_back(nb, 1.0);
-    }
+    // 26-connected graph for better diagonal movement
+    for (int dx = -1; dx <= 1; ++dx)
+      for (int dy = -1; dy <= 1; ++dy)
+        for (int dz = -1; dz <= 1; ++dz) {
+          if (dx == 0 && dy == 0 && dz == 0) continue;
+          Eigen::Vector3i nb(dx, dy, dz);
+          neighbors.emplace_back(nb, nb.cast<double>().norm());
+        }
     bool ret = false;
     NodePtr curPtr = visit(start_idx);
     if (!curPtr->valid) {

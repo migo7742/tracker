@@ -48,7 +48,12 @@ struct Ekf {
     Eigen::MatrixXd K_tmp = Sigma * C.transpose() * (C * Sigma * C.transpose() + Rt).inverse();
     Eigen::VectorXd x_tmp = x + K_tmp * (z - C * x);
     const double vmax = 4;
-    return (x_tmp.tail(3).norm() <= vmax);
+    // Reject if resulting velocity is too high
+    if (x_tmp.tail(3).norm() > vmax) return false;
+    // Reject if resulting z position is out of reasonable range
+    // for a ground target (odom frame: ground ≈ -0.45)
+    if (x_tmp(2) < -1.0 || x_tmp(2) > 1.0) return false;
+    return true;
   }
   inline void update(const Eigen::Vector3d& z) {
     K = Sigma * C.transpose() * (C * Sigma * C.transpose() + Rt).inverse();
@@ -170,6 +175,20 @@ private:
     double update_dt = (this->now() - last_update_stamp_).seconds();
     if (update_dt < 15.0) {
       ekfPtr_->predict();
+      
+      // Velocity decay: when no observation for > DECAY_START seconds,
+      // exponentially decay velocity to prevent unbounded position drift.
+      // This does NOT change EKF timeout parameters — it only modifies
+      // the predicted state to be more conservative when observations are missing.
+      static constexpr double DECAY_START = 2.0;   // seconds before decay begins
+      static constexpr double DECAY_HALFLIFE = 0.5; // velocity halves every 0.5s after DECAY_START
+      if (update_dt > DECAY_START) {
+        double excess = update_dt - DECAY_START;
+        double decay = std::exp(-0.693 * excess / DECAY_HALFLIFE); // 0.693 = ln(2)
+        ekfPtr_->x.tail(3) *= decay;
+        RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 2000,
+          "no observation for %.1fs, velocity decayed to %.3f of original", update_dt, decay);
+      }
     } else {
       RCLCPP_WARN(this->get_logger(), "too long time no update! (%.1fs)", update_dt);
       return;
@@ -185,6 +204,9 @@ private:
     target_odom.twist.twist.linear.y = ekfPtr_->vel().y();
     target_odom.twist.twist.linear.z = ekfPtr_->vel().z();
     target_odom.pose.pose.orientation.w = 1.0;
+    // Publish time since last observation in covariance field [0]
+    // so planning can detect "stale prediction" and decide to hover.
+    target_odom.pose.covariance[0] = update_dt;
     target_odom_pub_->publish(target_odom);
   }
 
@@ -242,11 +264,24 @@ private:
     double height = ymax - ymin;
     double depth = target_real_height_ / height * fy_;
     depth = std::clamp(depth, 0.8, 15.0);
-    double y = ((ymin + ymax) * 0.5 - cy_) * depth / fy_;
+    // Use bbox bottom (ymax) instead of center for y projection.
+    // The center corresponds to the person's torso, but we want
+    // the foot position (ground level). cam2body_R maps camera-y
+    // to body -z, so a lower image point (larger y) → lower z in
+    // world frame, giving us a ground-level target position.
+    double y = (ymax - cy_) * depth / fy_;
     double x = ((xmin + xmax) * 0.5 - cx_) * depth / fx_;
     Eigen::Vector3d p(x, y, depth);
 
     p = cam_q * p + cam_p;
+
+    // Clamp target z in odom frame to a reasonable range for a
+    // ground target.  The ground is at roughly z = -0.45 in odom
+    // frame, so a person's feet should be near there and their
+    // head at most ~1.3m above ground (z ≈ 0.85).
+    // Allowing [-1.0, 0.5] is generous but prevents z from
+    // flying to 2.0+ or 6.0 as observed in logs.
+    p.z() = std::clamp(p.z(), -1.0, 0.5);
 
     nav_msgs::msg::Odometry yolo_odom;
     yolo_odom.header.stamp = det_msg->header.stamp;

@@ -72,6 +72,10 @@ class PlanningNode : public rclcpp::Node {
   rclcpp::Time force_hover_start_{0, 0, RCL_ROS_TIME};
   int consecutive_replan_failures_ = 0;
   static constexpr int MAX_CONSECUTIVE_FAILURES = 15;
+  
+  // Rate-limit target position jumps to reject EKF outliers
+  Eigen::Vector3d last_valid_target_ = Eigen::Vector3d::Zero();
+  bool has_valid_target_ = false;
 
   nav_msgs::msg::Odometry odom_msg_, target_msg_;
   quadrotor_msgs::msg::OccMap3d map_msg_;
@@ -84,12 +88,14 @@ class PlanningNode : public rclcpp::Node {
   std::atomic_bool target_received_ = ATOMIC_VAR_INIT(false);
   std::atomic_bool land_triger_received_ = ATOMIC_VAR_INIT(false);
 
-  static constexpr double MIN_HOVER_Z = 1.0;  // ~1.45m above ground in world frame
+  static constexpr double MIN_HOVER_Z = 1.3;  // ~1.75m above ground in world frame
   // Z offset added to target for all planning computations.
-  // Original design: target_p.z += offset once, then used consistently
-  // for prediction, path search, corridor, and traj_opt.
-  // This makes the drone fly ~1m above the ground target.
-  static constexpr double TRACKING_Z_OFFSET = 1.0;
+  // Reduced from 1.0 to 0.3 to avoid excessive climbing.
+  static constexpr double TRACKING_Z_OFFSET = 0.3;
+  // Maximum XY distance for a single planning step. When the target is farther,
+  // we create a virtual intermediate target along the direction to avoid generating
+  // trajectories that force excessive speed (distance/tracking_dur > vmax).
+  static constexpr double MAX_PLAN_DIST = 6.0;  // meters, ~2m/s average over 3s
 
   // Compute a safe hover point ahead of current position in the velocity direction
   // to avoid abrupt stops. The drone will decelerate naturally to this point.
@@ -261,12 +267,39 @@ class PlanningNode : public rclcpp::Node {
     target_q.y() = replanStateMsg_.target.pose.pose.orientation.y;
     target_q.z() = replanStateMsg_.target.pose.pose.orientation.z;
 
+    // Check EKF observation staleness: covariance[0] contains seconds since last YOLO update.
+    // If no real observation for > STALE_OBS_THRESHOLD, the EKF is purely predicting
+    // (velocity is decaying but position may still be drifting). Hover and wait.
+    static constexpr double STALE_OBS_THRESHOLD = 3.0;  // seconds
+    double obs_age = replanStateMsg_.target.pose.covariance[0];
+    if (obs_age > STALE_OBS_THRESHOLD) {
+      // Compute yaw towards last known target position so camera faces
+      // the target — this gives YOLO a chance to re-detect after turning.
+      Eigen::Vector3d dp_stale = target_p - odom_p;
+      double stale_yaw = std::atan2(dp_stale.y(), dp_stale.x());
+      if (!wait_hover_) {
+        Eigen::Vector3d brake_p = compute_brake_point(odom_p, odom_v);
+        pub_hover_p(brake_p, this->now(), stale_yaw);
+        wait_hover_ = true;
+        force_hover_ = true;
+        force_hover_start_ = this->now();
+      } else {
+        // Keep updating yaw while hovering to track target direction
+        pub_hover_p(hover_pos_, this->now(), stale_yaw);
+      }
+      RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 1000,
+        "[planner] EKF observation stale (%.1fs no YOLO update), hovering & facing target...", obs_age);
+      return;
+    }
+
     // Sanity check: reject clearly invalid target estimates (EKF drift)
+    // Only reject extreme outliers — original project had NO distance check.
+    // Use a generous threshold to avoid blocking normal tracking.
     {
       double target_z_in_world = target_p.z() + 0.45;
-      bool z_invalid = target_z_in_world < -0.3 || target_z_in_world > 4.0;
+      bool z_invalid = target_z_in_world < -0.5 || target_z_in_world > 5.0;
       double xy_dist_raw = (target_p - odom_p).head(2).norm();
-      bool dist_invalid = xy_dist_raw > tracking_dist_ * 2.5;
+      bool dist_invalid = xy_dist_raw > 30.0;  // absolute 30m limit, not relative to tracking_dist
       if (z_invalid || dist_invalid) {
         if (!wait_hover_) {
           Eigen::Vector3d brake_p = compute_brake_point(odom_p, odom_v);
@@ -276,24 +309,48 @@ class PlanningNode : public rclcpp::Node {
           force_hover_start_ = this->now();
         }
         RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 1000,
-          "[planner] target estimate unreasonable (z_world=%.2f, xy_dist=%.2f, limit=%.1f), hovering",
-          target_z_in_world, xy_dist_raw, tracking_dist_ * 2.5);
+          "[planner] target estimate unreasonable (z_world=%.2f, xy_dist=%.2f), hovering",
+          target_z_in_world, xy_dist_raw);
         return;
       }
     }
 
-    // NOTE force-hover: waiting for the speed of drone small enough
+    // Rate-limit target position jumps: if the target moved more than MAX_JUMP
+    // since last valid position, clamp it. This prevents EKF glitches (e.g., 
+    // target y jumping from 1.5 to -5.9 in one step) from sending the drone
+    // on wild trajectories.
+    {
+      static constexpr double MAX_JUMP = 1.0;  // meters, max target jump per replan cycle (~10Hz)
+      if (has_valid_target_) {
+        double jump = (target_p - last_valid_target_).head(2).norm();
+        if (jump > MAX_JUMP) {
+          Eigen::Vector3d dir = (target_p - last_valid_target_);
+          dir.z() = 0;
+          dir.normalize();
+          Eigen::Vector3d clamped = last_valid_target_ + dir * MAX_JUMP;
+          clamped.z() = target_p.z();  // keep z as-is (handled separately)
+          RCLCPP_WARN(this->get_logger(),
+            "[planner] target jumped %.2fm (%.2f,%.2f)->(%.2f,%.2f), clamping to (%.2f,%.2f)",
+            jump, last_valid_target_.x(), last_valid_target_.y(),
+            target_p.x(), target_p.y(), clamped.x(), clamped.y());
+          target_p = clamped;
+        }
+      }
+      last_valid_target_ = target_p;
+      has_valid_target_ = true;
+    }
+
+    // NOTE force-hover: wait for drone to settle before replanning.
+    // IMPORTANT: odom_v from /Odometry is ZERO (small_point_lio doesn't fill twist),
+    // so we CANNOT use velocity to determine settling. Use a fixed timeout instead.
     if (force_hover_) {
       double hover_elapsed = (this->now() - force_hover_start_).seconds();
-      if (odom_v.norm() > 0.3 && hover_elapsed < 3.0) {
-        RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 1000,
-          "[planner] force_hover: waiting velocity settle (v=%.2f, elapsed=%.1fs)", odom_v.norm(), hover_elapsed);
+      if (hover_elapsed < 1.0) {
+        RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 500,
+          "[planner] force_hover: waiting %.1fs/1.0s to settle", hover_elapsed);
         return;
       }
-      if (hover_elapsed >= 3.0) {
-        RCLCPP_WARN(this->get_logger(), "[planner] force_hover timeout (%.1fs), resuming planning", hover_elapsed);
-        force_hover_ = false;
-      }
+      force_hover_ = false;
     }
 
     // Safety: clamp target EKF position so it can't be closer than a minimum
@@ -324,8 +381,36 @@ class PlanningNode : public rclcpp::Node {
       target_p = target_p + target_q * land_p_;
       wait_hover_ = false;
     } else {
+      // Clamp target z to reasonable ground-target range BEFORE adding offset.
+      // This is the last line of defense against EKF z drift.
+      // Ground is at z ≈ -0.45 in odom frame; person feet are near there.
+      target_p.z() = std::clamp(target_p.z(), -0.8, 0.5);
       // Compute desired tracking height offset for traj_opt (drone should fly above target)
       target_p.z() += TRACKING_Z_OFFSET;
+      // Clamp target_p.z (planning height) to MIN_HOVER_Z
+      target_p.z() = std::max(target_p.z(), MIN_HOVER_Z);
+      // Also clamp target_v.z to prevent downward drift from polluting planning
+      if (target_p.z() <= MIN_HOVER_Z + 0.1 && target_v.z() < 0) {
+        target_v.z() = 0.0;  // Don't predict target going underground
+      }
+
+      // Limit max planning distance: when target is too far, create a virtual
+      // intermediate target along the direction. This prevents the optimizer
+      // from generating trajectories that exceed vmax (distance/tracking_dur).
+      double dist_to_target_xy = (target_p - odom_p).head(2).norm();
+      if (dist_to_target_xy > MAX_PLAN_DIST + tracking_dist_) {
+        // Virtual target: MAX_PLAN_DIST along the direction, keep z the same
+        Eigen::Vector3d dir = (target_p - odom_p);
+        dir.z() = 0;
+        dir.normalize();
+        Eigen::Vector3d virtual_target = odom_p + dir * (MAX_PLAN_DIST + tracking_dist_);
+        virtual_target.z() = target_p.z();
+        // Scale velocity proportionally (still heading towards real target)
+        RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 2000,
+          "[planner] Target too far (%.1fm), clamping plan dist to %.1fm",
+          dist_to_target_xy, MAX_PLAN_DIST + tracking_dist_);
+        target_p = virtual_target;
+      }
       // NOTE determin whether to replan
       Eigen::Vector3d dp = target_p - odom_p;
       // std::cout << "dist : " << dp.norm() << std::endl;
@@ -336,24 +421,18 @@ class PlanningNode : public rclcpp::Node {
       double yaw_err = std::fabs(desired_yaw - now_yaw);
       if (yaw_err > M_PI) yaw_err = 2 * M_PI - yaw_err;
 
-      double enter_dist_thr = tolerance_d_;
-      double exit_dist_thr = tolerance_d_ * 2.5;
-      double enter_yaw_thr = 1.0;
-      double exit_yaw_thr = 1.8;
-
-      bool should_hover;
-      if (wait_hover_) {
-        should_hover = (dist_err < exit_dist_thr) && (yaw_err < exit_yaw_thr);
-      } else {
-        // Don't enter hover while still moving fast — let the trajectory
-        // decelerate naturally first to avoid abrupt stops
-        should_hover = (dist_err < enter_dist_thr) && (yaw_err < enter_yaw_thr)
-                       && (odom_v.norm() < 0.5);
-      }
+      // NOTE determin whether to replan: hover if close enough and stable
+      // Hover condition: match original project logic (simple, no hysteresis)
+      // Original: |dist - tracking_dist| < tolerance_d && v < 0.1 && target_v < 0.2 && |yaw_err| < 0.5
+      bool should_hover = (dist_err < tolerance_d_) &&
+                           (odom_v.norm() < 0.1) &&
+                           (target_v.norm() < 0.2) &&
+                           (yaw_err < 0.5);
 
       if (should_hover) {
         if (!wait_hover_) {
           hover_pos_ = odom_p;  // Lock hover position on entry
+          hover_pos_.z() = std::max(hover_pos_.z(), MIN_HOVER_Z);  // Clamp z up
           pub_hover_p(hover_pos_, this->now(), desired_yaw);
           wait_hover_ = true;
           RCLCPP_WARN(this->get_logger(),
@@ -368,8 +447,8 @@ class PlanningNode : public rclcpp::Node {
       } else {
         if (wait_hover_) {
           RCLCPP_WARN(this->get_logger(),
-            "[planner] Leaving hover (dist_err=%.2f/%.2f, yaw_err=%.2f/%.2f)",
-            dist_err, exit_dist_thr, yaw_err, exit_yaw_thr);
+            "[planner] Leaving hover (dist_err=%.2f, yaw_err=%.2f, v_drone=%.2f, v_target=%.2f)",
+            dist_err, yaw_err, odom_v.norm(), target_v.norm());
         }
         wait_hover_ = false;
       }
@@ -384,6 +463,23 @@ class PlanningNode : public rclcpp::Node {
     gridmapPtr_->from_msg(map_msg_);
     replanStateMsg_.occmap = map_msg_;
     gridmap_lock_.clear();
+
+    // Clear a small region around the target in the local map copy.
+    // The target (a person) is itself detected as an obstacle by the depth
+    // camera. Without this, prediction search fails immediately because
+    // the starting cell is occupied ("no way!"). The mapping node already
+    // does this via use_mask, but the mask may be too small when combined
+    // with inflation (inflate_size=2 → 0.3m extra), and the target might
+    // be near real obstacles like pillars whose inflated zone overlaps.
+    // We clear ±0.6m in xy and ±1.0m in z around the target.
+    {
+      Eigen::Vector3d mask_ld = target_p;
+      Eigen::Vector3d mask_ru = target_p;
+      mask_ld.x() -= 0.6; mask_ld.y() -= 0.6; mask_ld.z() -= 1.0;
+      mask_ru.x() += 0.6; mask_ru.y() += 0.6; mask_ru.z() += 1.0;
+      gridmapPtr_->setFree(mask_ld, mask_ru);
+    }
+
     prePtr_->setMap(*gridmapPtr_);
 
     // visualize the ray from drone to target
@@ -405,10 +501,43 @@ class PlanningNode : public rclcpp::Node {
       target_predcit.clear();
       double dt = 0.2;  // tracking_dt
       double dur = 3.0; // tracking_dur
+      // Zero out target_v.z for linear fallback: the EKF's z velocity estimate
+      // is unreliable for a ground target, and non-zero v.z causes the predicted
+      // trajectory to climb/dive, leading to excessive altitude changes.
+      Eigen::Vector3d fallback_v = target_v;
+      fallback_v.z() = 0.0;
       for (double t = 0; t <= dur + 1e-6; t += dt) {
-        target_predcit.push_back(target_p + target_v * t);
+        Eigen::Vector3d pt = target_p + fallback_v * t;
+        // Clamp predicted z: target (with TRACKING_Z_OFFSET applied) should not go below MIN_HOVER_Z
+        pt.z() = std::max(pt.z(), MIN_HOVER_Z);
+        // Stop predicting into obstacles: truncate here and fill remaining with last valid point
+        if (t > 0 && gridmapPtr_->isOccupied(pt)) {
+          Eigen::Vector3d last_valid = target_predcit.back();
+          while (target_predcit.size() < static_cast<size_t>((dur / dt) + 2)) {
+            target_predcit.push_back(last_valid);
+          }
+          break;
+        }
+        target_predcit.push_back(pt);
       }
       generate_new_traj_success = true;
+    }
+    // Post-process: truncate any prediction points that land inside obstacles.
+    // This protects findVisiblePath from searching toward unreachable targets,
+    // which causes search timeouts.
+    if (generate_new_traj_success && target_predcit.size() > 2) {
+      for (size_t i = 1; i < target_predcit.size(); ++i) {
+        if (gridmapPtr_->isOccupied(target_predcit[i])) {
+          Eigen::Vector3d last_valid = target_predcit[i - 1];
+          // Fill remaining with last valid point
+          for (size_t j = i; j < target_predcit.size(); ++j) {
+            target_predcit[j] = last_valid;
+          }
+          RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 1000,
+            "[planner] prediction truncated at step %zu/%zu (occupied)", i, target_predcit.size());
+          break;
+        }
+      }
     }
     {
       Eigen::Vector3d observable_p = target_predcit.back();
@@ -475,6 +604,34 @@ class PlanningNode : public rclcpp::Node {
     std::vector<Eigen::Vector3d> visible_ps;
     std::vector<double> thetas;
     Trajectory traj;
+
+    // Sanity check: reject paths that go in the OPPOSITE direction from the target.
+    // This can happen when findVisiblePath wraps around dense obstacles.
+    // When detected, treat it as "too close" and hover toward target rather than
+    // accumulating REPLAN FAILED counts toward EMERGENCY STOP.
+    if (generate_new_traj_success && path.size() >= 2 && !land_triger_received_) {
+      Eigen::Vector2d drone_to_target = (target_p - p_start).head(2);
+      Eigen::Vector2d drone_to_pathend = (path.back() - p_start).head(2);
+      double dot = drone_to_target.dot(drone_to_pathend);
+      if (dot < 0 && drone_to_target.norm() > 1.0) {
+        // Path endpoint is behind the drone relative to target direction
+        RCLCPP_WARN(this->get_logger(),
+          "[planner] path direction reversed (dot=%.2f), hovering instead. "
+          "path_end=(%.2f,%.2f), target=(%.2f,%.2f)",
+          dot, path.back().x(), path.back().y(), target_p.x(), target_p.y());
+        // Instead of rejecting and counting toward EMERGENCY STOP,
+        // hover at current position facing target. This is much safer.
+        double yaw_to_target = std::atan2(drone_to_target.y(), drone_to_target.x());
+        Eigen::Vector3d hover_p = odom_p;
+        hover_p.z() = std::max(odom_p.z(), MIN_HOVER_Z);
+        pub_hover_p(hover_p, this->now(), yaw_to_target);
+        replanStateMsg_.state = -1;
+        replanState_pub_->publish(replanStateMsg_);
+        consecutive_replan_failures_ = 0;  // Reset failure count — this is a controlled hover, not a failure
+        return;
+      }
+    }
+
     if (generate_new_traj_success) {
       // Clamp all path z values to MIN_HOVER_Z to prevent low-altitude corridors
       for (auto& pt : path) {
@@ -525,6 +682,10 @@ class PlanningNode : public rclcpp::Node {
       finState.setZero(3, 3);
       finState.col(0) = path.back();
       finState.col(1) = target_v;
+      // Clamp finState z to ensure traj_opt doesn't get an underground target
+      if (finState(2, 0) < MIN_HOVER_Z) {
+        finState(2, 0) = MIN_HOVER_Z;
+      }
       RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 1000,
         "[planner] finState=(%.2f,%.2f,%.2f) corridors=%zu",
         finState.col(0).x(), finState.col(0).y(), finState.col(0).z(),

@@ -340,8 +340,27 @@ bool TrajOpt::generate_traj(const Eigen::MatrixXd& iniState,
     cfgHs_.push_back(cfgHs_[0]);
   }
   if (!extractVs(cfgHs_, cfgVs_)) {
-    RCLCPP_ERROR(nh_->get_logger(), "extractVs fail!");
-    return false;
+    // Retry with graduated inflation to fix degenerate corridor intersection
+    static const double inflate_amounts[] = {0.2, 0.4, 0.6};
+    bool success = false;
+    for (double inflate : inflate_amounts) {
+      cfgHs_ = hPolys;  // reset to original
+      if (cfgHs_.size() == 1) cfgHs_.push_back(cfgHs_[0]);
+      for (auto& hPoly : cfgHs_) {
+        for (int j = 0; j < hPoly.cols(); ++j) {
+          hPoly.col(j).tail(3) += hPoly.col(j).head(3) * inflate;
+        }
+      }
+      if (extractVs(cfgHs_, cfgVs_)) {
+        RCLCPP_WARN(nh_->get_logger(), "extractVs recovered with inflate=%.2f", inflate);
+        success = true;
+        break;
+      }
+    }
+    if (!success) {
+      RCLCPP_ERROR(nh_->get_logger(), "extractVs fail after all inflate retries!");
+      return false;
+    }
   }
   N_ = 2 * cfgHs_.size();
   // NOTE wonderful trick
@@ -391,8 +410,26 @@ bool TrajOpt::generate_traj(const Eigen::MatrixXd& iniState,
     cfgHs_.push_back(cfgHs_[0]);
   }
   if (!extractVs(cfgHs_, cfgVs_)) {
-    RCLCPP_ERROR(nh_->get_logger(), "extractVs fail!");
-    return false;
+    static const double inflate_amounts[] = {0.2, 0.4, 0.6};
+    bool success = false;
+    for (double inflate : inflate_amounts) {
+      cfgHs_ = hPolys;
+      if (cfgHs_.size() == 1) cfgHs_.push_back(cfgHs_[0]);
+      for (auto& hPoly : cfgHs_) {
+        for (int j = 0; j < hPoly.cols(); ++j) {
+          hPoly.col(j).tail(3) += hPoly.col(j).head(3) * inflate;
+        }
+      }
+      if (extractVs(cfgHs_, cfgVs_)) {
+        RCLCPP_WARN(nh_->get_logger(), "extractVs (landing) recovered with inflate=%.2f", inflate);
+        success = true;
+        break;
+      }
+    }
+    if (!success) {
+      RCLCPP_ERROR(nh_->get_logger(), "extractVs fail (landing) after all inflate retries!");
+      return false;
+    }
   }
   N_ = 2 * cfgHs_.size();
   // NOTE wonderful trick
@@ -668,8 +705,9 @@ bool TrajOpt::grad_cost_p_tracking(const Eigen::Vector3d& p,
   double floor_pen = MIN_FLIGHT_Z - p.z();
   if (floor_pen > 0) {
     double fp2 = floor_pen * floor_pen;
-    gradp.z() -= 6 * fp2;  // push z upward
-    costp += fp2 * floor_pen;
+    // Strong penalty: 10x multiplier to make this a near-hard constraint
+    gradp.z() -= 60 * fp2;  // push z upward aggressively
+    costp += 10.0 * fp2 * floor_pen;
     ret = true;
   }
 

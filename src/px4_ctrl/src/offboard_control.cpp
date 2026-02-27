@@ -15,6 +15,7 @@
 #include "px4_msgs/msg/vehicle_local_position.hpp"
 #include "px4_msgs/msg/vehicle_command.hpp"
 #include "px4_msgs/msg/vehicle_odometry.hpp"
+#include "nav_msgs/msg/odometry.hpp"
 
 #include "quadrotor_msgs/msg/position_command.hpp"
 #include "std_msgs/msg/string.hpp"
@@ -30,10 +31,10 @@ public:
         // --- 参数设置 ---
         this->declare_parameter("kp_x", 6.0);
         this->declare_parameter("kp_y", 6.0);
-        this->declare_parameter("kp_z", 8.0);
+        this->declare_parameter("kp_z", 10.0);
         this->declare_parameter("kv_x", 3.0); 
         this->declare_parameter("kv_y", 3.0);
-        this->declare_parameter("kv_z", 4.0);
+        this->declare_parameter("kv_z", 5.0);
         this->declare_parameter("hover_throttle", 0.5); // 关键：悬停油门
         this->declare_parameter("grav_acc", 9.81);
 
@@ -51,6 +52,11 @@ public:
         vehicle_visual_odom_sub_ = this->create_subscription<px4_msgs::msg::VehicleOdometry>(
             "/fmu/in/vehicle_visual_odometry", qos_best_effort,
             std::bind(&OffboardControl::vehicle_visual_odom_callback, this, std::placeholders::_1));
+
+        // Subscribe to /Odometry (same source as planning) to get odom z for z-offset correction
+        ros_odom_sub_ = this->create_subscription<nav_msgs::msg::Odometry>(
+            "/Odometry", 10,
+            std::bind(&OffboardControl::ros_odom_callback, this, std::placeholders::_1));
 
         planning_pos_cmd_sub_ = this->create_subscription<quadrotor_msgs::msg::PositionCommand>(
             "/drone_0_planning/pos_cmd", qos_best_effort,
@@ -84,6 +90,7 @@ private:
     rclcpp::Subscription<px4_msgs::msg::VehicleStatus>::SharedPtr status_sub_;
     rclcpp::Subscription<px4_msgs::msg::VehicleLocalPosition>::SharedPtr vehicle_local_position_sub_;
     rclcpp::Subscription<px4_msgs::msg::VehicleOdometry>::SharedPtr vehicle_visual_odom_sub_;
+    rclcpp::Subscription<nav_msgs::msg::Odometry>::SharedPtr ros_odom_sub_;
     rclcpp::Subscription<quadrotor_msgs::msg::PositionCommand>::SharedPtr planning_pos_cmd_sub_;
     rclcpp::Subscription<std_msgs::msg::String>::SharedPtr mode_cmd_sub_;
     rclcpp::Publisher<px4_msgs::msg::OffboardControlMode>::SharedPtr publisher_offboard_mode_;
@@ -102,6 +109,7 @@ private:
     
     bool vehicle_local_position_received_ = false;
     bool vehicle_visual_odom_received_ = false;
+    bool ros_odom_received_ = false;
     bool planning_pos_command_received_ = false;
     bool takeoff_hover_des_set_ = false;
     bool offboard_hover_des_set_ = false;
@@ -109,6 +117,9 @@ private:
     static constexpr double CMD_TIMEOUT_SEC = 0.5;
 
     px4_msgs::msg::TrajectorySetpoint hover_setpoint_;
+
+    // Z from /Odometry in NED (for z-offset correction in geometric controller)
+    double odom_z_ned_ = 0.0;  // -odom_z_enu
 
     double quaternion_to_yaw(double w, double x, double y, double z) {
         double siny_cosp = 2 * (w * z + x * y);
@@ -124,6 +135,11 @@ private:
     void vehicle_visual_odom_callback(const px4_msgs::msg::VehicleOdometry::SharedPtr msg) {
         vehicle_visual_odom_ = *msg;
         vehicle_visual_odom_received_ = true;
+    }
+    void ros_odom_callback(const nav_msgs::msg::Odometry::SharedPtr msg) {
+        // Only extract z for z-offset correction (ENU z -> NED z = -z)
+        odom_z_ned_ = -msg->pose.pose.position.z;
+        ros_odom_received_ = true;
     }
     void vehicle_local_position_callback(const px4_msgs::msg::VehicleLocalPosition::SharedPtr msg) {
         vehicle_local_position_ = *msg;
@@ -171,6 +187,13 @@ private:
             pos_curr << vehicle_visual_odom_.position[0], vehicle_visual_odom_.position[1], vehicle_visual_odom_.position[2];
             vel_curr << vehicle_visual_odom_.velocity[0], vehicle_visual_odom_.velocity[1], vehicle_visual_odom_.velocity[2];
         }
+        // Z-offset correction: planning uses /Odometry z, but pos_curr uses
+        // vehicle_local_position z which has a different origin (~0.77m offset).
+        // Replace only the z component with odom z to match planning's coordinate.
+        // XY and velocity are kept from vehicle_local_position (no origin offset issue for xy/vel).
+        if (ros_odom_received_) {
+            pos_curr(2) = odom_z_ned_;
+        }
 
         // 2. 转换指令 (ENU -> NED)
         Eigen::Vector3d pos_des_enu(latest_planning_msg_.position.x, latest_planning_msg_.position.y, latest_planning_msg_.position.z);
@@ -200,10 +223,13 @@ private:
         // 防止由于避障加速度过大导致机体倾斜过度而掉高
         // =================================================================
         
-        // 设定最大倾角 (例如 45度 ~ 60度)
-        // 如果你的飞机动力很足，可以设大一点(比如 60度 -> M_PI/3.0)
-        // 如果容易掉高，先设小一点(比如 35度 -> 35.0 * M_PI / 180.0)
-        double max_tilt_angle = 45.0 * (M_PI / 180.0); 
+        // 设定最大倾角
+        // 45° causes significant altitude loss during horizontal pursuit
+        // (cos(45°)=0.71, only 71% vertical thrust). This leads to z dropping
+        // from 1.3 to 0.95, which causes the camera to lose sight of the target.
+        // 30° keeps cos(30°)=0.87 vertical thrust, trading horizontal speed for
+        // stable altitude and reliable YOLO detections.
+        double max_tilt_angle = 30.0 * (M_PI / 180.0); 
 
         // 分解水平和垂直加速度
         // 在 NED 中，向上的加速度是负值。我们取绝对值看大小。
@@ -314,9 +340,11 @@ private:
             if (!takeoff_hover_des_set_ && vehicle_local_position_received_) {
                 hover_setpoint_.position[0] = vehicle_local_position_.x;
                 hover_setpoint_.position[1] = vehicle_local_position_.y;
-                hover_setpoint_.position[2] = -1.5; 
+                // Use odom z for takeoff hover to stay consistent with planning frame
+                hover_setpoint_.position[2] = ros_odom_received_ ? std::min(odom_z_ned_, -1.5) : -1.5; 
                 hover_setpoint_.yaw = vehicle_local_position_.heading;
                 takeoff_hover_des_set_ = true;
+                RCLCPP_WARN(this->get_logger(), "Takeoff hover set: z=%.2f", hover_setpoint_.position[2]);
             }
             if(takeoff_hover_des_set_) publish_position_setpoint(hover_setpoint_.position[0], hover_setpoint_.position[1], hover_setpoint_.position[2], hover_setpoint_.yaw);
             return;
@@ -326,9 +354,13 @@ private:
             if (!offboard_hover_des_set_ && vehicle_local_position_received_) {
                 hover_setpoint_.position[0] = vehicle_local_position_.x;
                 hover_setpoint_.position[1] = vehicle_local_position_.y;
-                hover_setpoint_.position[2] = std::min(vehicle_local_position_.z, -1.5f);  // NED: at least 1.5m up
+                // Use odom z (same source as planning) to avoid z-offset between PX4 EKF2 and LIO
+                double hover_z = ros_odom_received_ ? odom_z_ned_ : vehicle_local_position_.z;
+                hover_setpoint_.position[2] = std::min(hover_z, -1.0);  // NED: at least 1.0m up
                 hover_setpoint_.yaw = vehicle_local_position_.heading;
                 offboard_hover_des_set_ = true;
+                RCLCPP_WARN(this->get_logger(), "Hover set: z=%.2f (odom_z_ned=%.2f, vlp_z=%.2f)",
+                    hover_setpoint_.position[2], odom_z_ned_, vehicle_local_position_.z);
             }
             if(offboard_hover_des_set_) publish_position_setpoint(hover_setpoint_.position[0], hover_setpoint_.position[1], hover_setpoint_.position[2], hover_setpoint_.yaw);
             return;
@@ -341,11 +373,13 @@ private:
             if (!offboard_hover_des_set_ && vehicle_local_position_received_) {
                 hover_setpoint_.position[0] = vehicle_local_position_.x;
                 hover_setpoint_.position[1] = vehicle_local_position_.y;
-                hover_setpoint_.position[2] = std::min(vehicle_local_position_.z, -1.5f);  // NED: at least 1.5m above ground
+                // Use odom z (same source as planning) to avoid z-offset between PX4 EKF2 and LIO
+                double hover_z = ros_odom_received_ ? odom_z_ned_ : vehicle_local_position_.z;
+                hover_setpoint_.position[2] = std::min(hover_z, -1.0);  // NED: at least 1.0m up
                 hover_setpoint_.yaw = vehicle_local_position_.heading;
                 offboard_hover_des_set_ = true;
-                RCLCPP_WARN(this->get_logger(), "Planning cmd timeout (%.2fs), holding position at z=%.2f",
-                    cmd_age, hover_setpoint_.position[2]);
+                RCLCPP_WARN(this->get_logger(), "Planning cmd timeout (%.2fs), holding at z=%.2f (odom_z_ned=%.2f, vlp_z=%.2f)",
+                    cmd_age, hover_setpoint_.position[2], odom_z_ned_, vehicle_local_position_.z);
             }
                 if (offboard_hover_des_set_) {
                     publish_position_setpoint(hover_setpoint_.position[0], hover_setpoint_.position[1],

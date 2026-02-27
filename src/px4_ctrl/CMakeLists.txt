@@ -16,6 +16,7 @@ find_package(rclcpp REQUIRED)
 find_package(px4_msgs REQUIRED)
 find_package(quadrotor_msgs REQUIRED)
 find_package(std_msgs REQUIRED)
+find_package(nav_msgs REQUIRED)
 find_package(Eigen3 REQUIRED)
 
 # 如果你的 include 目录下没有头文件，这行可以注释掉，但保留也没事
@@ -30,6 +31,7 @@ ament_target_dependencies(offboard_control_node
   px4_msgs 
   quadrotor_msgs
   std_msgs
+  nav_msgs
 )
 
 # 链接 Eigen (使用现代 CMake 写法)

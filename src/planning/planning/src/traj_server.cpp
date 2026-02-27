@@ -47,7 +47,7 @@ private:
   quadrotor_msgs::msg::PolyTraj trajMsg_, trajMsg_last_;
   Eigen::Vector3d last_p_ = Eigen::Vector3d::Zero();
   double last_yaw_ = 0;
-  static constexpr double MIN_CMD_Z = 1.0;  // minimum Z in odom frame (~1.45m above ground)
+  static constexpr double MIN_CMD_Z = 1.3;  // minimum Z in odom frame (~1.75m above ground)
 
   void publish_cmd(int traj_id,
                    const Eigen::Vector3d &p,
@@ -65,12 +65,23 @@ private:
     cmd.position.z = std::max(p(2), MIN_CMD_Z);
     cmd.velocity.x = v(0);
     cmd.velocity.y = v(1);
-    // If position was clamped up, don't command downward velocity
-    cmd.velocity.z = (p(2) < MIN_CMD_Z && v(2) < 0) ? 0.0 : v(2);
     cmd.acceleration.x = a(0);
     cmd.acceleration.y = a(1);
-    // If position was clamped up, don't command downward acceleration
-    cmd.acceleration.z = (p(2) < MIN_CMD_Z && a(2) < 0) ? 0.0 : a(2);
+    // Z protection: when position is near or below floor, suppress downward motion
+    // and add upward velocity to actively recover altitude
+    if (p(2) < MIN_CMD_Z) {
+      // Below floor: zero out downward v/a, add upward velocity proportional to deficit
+      double z_deficit = MIN_CMD_Z - p(2);
+      cmd.velocity.z = std::max(v(2), z_deficit * 2.0);  // at least 2*deficit m/s upward
+      cmd.acceleration.z = std::max(a(2), 0.0);  // no downward acceleration
+    } else if (p(2) < MIN_CMD_Z + 0.3 && v(2) < 0) {
+      // Near floor with downward velocity: dampen it
+      cmd.velocity.z = v(2) * 0.3;  // reduce downward speed to 30%
+      cmd.acceleration.z = (a(2) < 0) ? a(2) * 0.3 : a(2);
+    } else {
+      cmd.velocity.z = v(2);
+      cmd.acceleration.z = a(2);
+    }
     cmd.yaw = y;
     cmd.yaw_dot = yd;
     pos_cmd_pub_->publish(cmd);
@@ -98,8 +109,8 @@ private:
         d_yaw = d_yaw >= M_PI ? d_yaw - 2 * M_PI : d_yaw;
         d_yaw = d_yaw <= -M_PI ? d_yaw + 2 * M_PI : d_yaw;
         double d_yaw_abs = fabs(d_yaw);
-        if (d_yaw_abs >= 0.01) {
-          yaw = last_yaw_ + d_yaw / d_yaw_abs * 0.01;
+        if (d_yaw_abs >= 0.02) {
+          yaw = last_yaw_ + d_yaw / d_yaw_abs * 0.02;
         }
         publish_cmd(trajMsg.traj_id, p, v0, v0, yaw, 0);
         last_yaw_ = yaw;
@@ -147,8 +158,8 @@ private:
       d_yaw = d_yaw >= M_PI ? d_yaw - 2 * M_PI : d_yaw;
       d_yaw = d_yaw <= -M_PI ? d_yaw + 2 * M_PI : d_yaw;
       double d_yaw_abs = fabs(d_yaw);
-      if (d_yaw_abs >= 0.01) {
-        yaw = last_yaw_ + d_yaw / d_yaw_abs * 0.01;
+      if (d_yaw_abs >= 0.02) {
+        yaw = last_yaw_ + d_yaw / d_yaw_abs * 0.02;
       }
       publish_cmd(trajMsg.traj_id, p, v, a, yaw, 0);  // TODO yaw
       last_yaw_ = yaw;
