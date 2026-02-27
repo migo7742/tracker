@@ -109,8 +109,8 @@ private:
         d_yaw = d_yaw >= M_PI ? d_yaw - 2 * M_PI : d_yaw;
         d_yaw = d_yaw <= -M_PI ? d_yaw + 2 * M_PI : d_yaw;
         double d_yaw_abs = fabs(d_yaw);
-        if (d_yaw_abs >= 0.02) {
-          yaw = last_yaw_ + d_yaw / d_yaw_abs * 0.02;
+        if (d_yaw_abs >= 0.03) {
+          yaw = last_yaw_ + d_yaw / d_yaw_abs * 0.03;
         }
         publish_cmd(trajMsg.traj_id, p, v0, v0, yaw, 0);
         last_yaw_ = yaw;
@@ -158,8 +158,8 @@ private:
       d_yaw = d_yaw >= M_PI ? d_yaw - 2 * M_PI : d_yaw;
       d_yaw = d_yaw <= -M_PI ? d_yaw + 2 * M_PI : d_yaw;
       double d_yaw_abs = fabs(d_yaw);
-      if (d_yaw_abs >= 0.02) {
-        yaw = last_yaw_ + d_yaw / d_yaw_abs * 0.02;
+      if (d_yaw_abs >= 0.03) {
+        yaw = last_yaw_ + d_yaw / d_yaw_abs * 0.03;
       }
       publish_cmd(trajMsg.traj_id, p, v, a, yaw, 0);  // TODO yaw
       last_yaw_ = yaw;

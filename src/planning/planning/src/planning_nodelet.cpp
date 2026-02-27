@@ -72,10 +72,13 @@ class PlanningNode : public rclcpp::Node {
   rclcpp::Time force_hover_start_{0, 0, RCL_ROS_TIME};
   int consecutive_replan_failures_ = 0;
   static constexpr int MAX_CONSECUTIVE_FAILURES = 15;
-  
-  // Rate-limit target position jumps to reject EKF outliers
-  Eigen::Vector3d last_valid_target_ = Eigen::Vector3d::Zero();
-  bool has_valid_target_ = false;
+
+  // Last target position when we had a fresh YOLO observation (obs_age < 1s).
+  // Used for yaw computation so the drone keeps facing the direction where
+  // the target was last seen, instead of following EKF prediction drift.
+  Eigen::Vector3d last_observed_target_p_ = Eigen::Vector3d::Zero();
+  bool has_observed_target_ = false;
+
 
   nav_msgs::msg::Odometry odom_msg_, target_msg_;
   quadrotor_msgs::msg::OccMap3d map_msg_;
@@ -270,12 +273,23 @@ class PlanningNode : public rclcpp::Node {
     // Check EKF observation staleness: covariance[0] contains seconds since last YOLO update.
     // If no real observation for > STALE_OBS_THRESHOLD, the EKF is purely predicting
     // (velocity is decaying but position may still be drifting). Hover and wait.
-    static constexpr double STALE_OBS_THRESHOLD = 3.0;  // seconds
+    static constexpr double STALE_OBS_THRESHOLD = 6.0;  // seconds
     double obs_age = replanStateMsg_.target.pose.covariance[0];
+
+    // Update last observed target position when we have fresh YOLO data.
+    // This is used for yaw computation so the drone faces where the target
+    // was actually seen, not where EKF predicts it drifted to.
+    if (obs_age < 1.0) {
+      last_observed_target_p_ = target_p;
+      has_observed_target_ = true;
+    }
+    // Compute yaw target: use last observed position if available, else fall back to EKF
+    Eigen::Vector3d yaw_target_p = has_observed_target_ ? last_observed_target_p_ : target_p;
+
     if (obs_age > STALE_OBS_THRESHOLD) {
-      // Compute yaw towards last known target position so camera faces
-      // the target — this gives YOLO a chance to re-detect after turning.
-      Eigen::Vector3d dp_stale = target_p - odom_p;
+      // Compute yaw towards last observed target position so camera faces
+      // the direction where the target was last seen.
+      Eigen::Vector3d dp_stale = yaw_target_p - odom_p;
       double stale_yaw = std::atan2(dp_stale.y(), dp_stale.x());
       if (!wait_hover_) {
         Eigen::Vector3d brake_p = compute_brake_point(odom_p, odom_v);
@@ -313,31 +327,6 @@ class PlanningNode : public rclcpp::Node {
           target_z_in_world, xy_dist_raw);
         return;
       }
-    }
-
-    // Rate-limit target position jumps: if the target moved more than MAX_JUMP
-    // since last valid position, clamp it. This prevents EKF glitches (e.g., 
-    // target y jumping from 1.5 to -5.9 in one step) from sending the drone
-    // on wild trajectories.
-    {
-      static constexpr double MAX_JUMP = 1.0;  // meters, max target jump per replan cycle (~10Hz)
-      if (has_valid_target_) {
-        double jump = (target_p - last_valid_target_).head(2).norm();
-        if (jump > MAX_JUMP) {
-          Eigen::Vector3d dir = (target_p - last_valid_target_);
-          dir.z() = 0;
-          dir.normalize();
-          Eigen::Vector3d clamped = last_valid_target_ + dir * MAX_JUMP;
-          clamped.z() = target_p.z();  // keep z as-is (handled separately)
-          RCLCPP_WARN(this->get_logger(),
-            "[planner] target jumped %.2fm (%.2f,%.2f)->(%.2f,%.2f), clamping to (%.2f,%.2f)",
-            jump, last_valid_target_.x(), last_valid_target_.y(),
-            target_p.x(), target_p.y(), clamped.x(), clamped.y());
-          target_p = clamped;
-        }
-      }
-      last_valid_target_ = target_p;
-      has_valid_target_ = true;
     }
 
     // NOTE force-hover: wait for drone to settle before replanning.
@@ -413,8 +402,9 @@ class PlanningNode : public rclcpp::Node {
       }
       // NOTE determin whether to replan
       Eigen::Vector3d dp = target_p - odom_p;
-      // std::cout << "dist : " << dp.norm() << std::endl;
-      double desired_yaw = std::atan2(dp.y(), dp.x());
+      // Yaw should face last observed target, not EKF-predicted position
+      Eigen::Vector3d dp_yaw = yaw_target_p - odom_p;
+      double desired_yaw = std::atan2(dp_yaw.y(), dp_yaw.x());
       Eigen::Vector3d project_yaw = odom_q.toRotationMatrix().col(0);  // NOTE ZYX
       double now_yaw = std::atan2(project_yaw.y(), project_yaw.x());
       double dist_err = std::fabs(dp.head(2).norm() - tracking_dist_);
@@ -422,11 +412,8 @@ class PlanningNode : public rclcpp::Node {
       if (yaw_err > M_PI) yaw_err = 2 * M_PI - yaw_err;
 
       // NOTE determin whether to replan: hover if close enough and stable
-      // Hover condition: match original project logic (simple, no hysteresis)
-      // Original: |dist - tracking_dist| < tolerance_d && v < 0.1 && target_v < 0.2 && |yaw_err| < 0.5
       bool should_hover = (dist_err < tolerance_d_) &&
                            (odom_v.norm() < 0.1) &&
-                           (target_v.norm() < 0.2) &&
                            (yaw_err < 0.5);
 
       if (should_hover) {
@@ -452,6 +439,7 @@ class PlanningNode : public rclcpp::Node {
         }
         wait_hover_ = false;
       }
+
 
       // target_p.z now has TRACKING_Z_OFFSET applied.
       // All downstream (prediction, path, corridor, traj_opt) use this consistently.
@@ -613,7 +601,7 @@ class PlanningNode : public rclcpp::Node {
       Eigen::Vector2d drone_to_target = (target_p - p_start).head(2);
       Eigen::Vector2d drone_to_pathend = (path.back() - p_start).head(2);
       double dot = drone_to_target.dot(drone_to_pathend);
-      if (dot < 0 && drone_to_target.norm() > 1.0) {
+      if (dot < -1.5 && drone_to_target.norm() > 1.0) {
         // Path endpoint is behind the drone relative to target direction
         RCLCPP_WARN(this->get_logger(),
           "[planner] path direction reversed (dot=%.2f), hovering instead. "
@@ -718,7 +706,7 @@ class PlanningNode : public rclcpp::Node {
       RCLCPP_WARN(this->get_logger(), "[planner] REPLAN SUCCESS");
       replanStateMsg_.state = 0;
       replanState_pub_->publish(replanStateMsg_);
-      Eigen::Vector3d dp = target_p + target_v * 0.03 - iniState.col(0);
+      Eigen::Vector3d dp = yaw_target_p + target_v * 0.03 - iniState.col(0);
       double yaw = std::atan2(dp.y(), dp.x());
       if (land_triger_received_) {
         yaw = 2 * std::atan2(target_q.z(), target_q.w());

@@ -170,8 +170,12 @@ private:
   rclcpp::Time last_update_stamp_;
   int consecutive_rejects_ = 0;
   static constexpr int MAX_CONSECUTIVE_REJECTS = 10;
+  bool has_valid_observation_ = false;  // only publish target_odom after first real detection
 
   void predict_state_callback() {
+    // Don't publish target_odom until we have received at least one real detection
+    if (!has_valid_observation_) return;
+
     double update_dt = (this->now() - last_update_stamp_).seconds();
     if (update_dt < 15.0) {
       ekfPtr_->predict();
@@ -230,7 +234,13 @@ private:
     Eigen::Vector3d cam_p = odom_q.toRotationMatrix() * cam2body_p_ + odom_p;
     Eigen::Quaterniond cam_q = odom_q * Eigen::Quaterniond(cam2body_R_);
 
-    if (det_msg->detections.empty()) return;
+    if (det_msg->detections.empty()) {
+      RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 2000,
+          "[sync] detections empty, skipping (sync #%d)", sync_count_);
+      return;
+    }
+    RCLCPP_INFO(this->get_logger(),
+        "[sync] detections=%zu, processing (sync #%d)", det_msg->detections.size(), sync_count_);
 
     // 从 Detection2DArray 中选取第一个匹配 target_class_ 的检测
     // 如果 target_class_ 为空则取第一个
@@ -296,15 +306,18 @@ private:
     if (update_dt > 16.0) {
       ekfPtr_->reset(p);
       consecutive_rejects_ = 0;
+      has_valid_observation_ = true;
       RCLCPP_WARN(this->get_logger(), "ekf reset (stale, dt=%.1fs)!", update_dt);
     } else if (ekfPtr_->checkValid(p)) {
       ekfPtr_->update(p);
       consecutive_rejects_ = 0;
+      has_valid_observation_ = true;
     } else {
       consecutive_rejects_++;
       if (consecutive_rejects_ >= MAX_CONSECUTIVE_REJECTS) {
         ekfPtr_->reset(p);
         consecutive_rejects_ = 0;
+        has_valid_observation_ = true;
         RCLCPP_WARN(this->get_logger(), "ekf reset (consecutive rejects=%d), pos=(%.2f,%.2f,%.2f)",
             MAX_CONSECUTIVE_REJECTS, p.x(), p.y(), p.z());
       } else {

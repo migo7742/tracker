@@ -200,7 +200,7 @@ def launch_setup(context):
                     'rhosVisibility': 10000.0,
                     'theta_clearance': 0.8,
                     'clearance_d': 0.4,
-                    'tolerance_d': 0.3,
+                    'tolerance_d': 1.0,
                     'tracking_dist': 3.5,
                     'tracking_dur': 3.0,
                     'tracking_dt': 0.2,

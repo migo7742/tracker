@@ -57,7 +57,7 @@ class NodeComparator {
 
 class Env {
   static constexpr int MAX_MEMORY = 1 << 20;        // 1048576 (~80MB)
-  static constexpr int SHORT_MAX_MEMORY = 1 << 18;  // 262144
+  static constexpr int SHORT_MAX_MEMORY = 1 << 19;  // 524288 (doubled to reduce OOM in dense areas)
   static constexpr double MAX_DURATION = 0.5;
   static constexpr double SHORT_MAX_DURATION = 0.4;  // was 0.2, increased for dense environments
 
@@ -456,15 +456,10 @@ class Env {
       Eigen::Vector3i dp = end_idx - ptr->idx;
       double dr = dp.head(2).norm();
       double lambda = 1.0 - stop_dist / std::max(dr, 1e-6);
-      // When lambda < 0 (drone is inside the tracking circle), the standard
-      // heuristic collapses (h≈0) and A* degenerates into Dijkstra, searching
-      // in all directions equally. This causes it to find points BEHIND the
-      // drone, leading to "path direction reversed".
-      // Fix: when inside the circle, clamp lambda to 0 so the heuristic still
-      // guides toward the target (the closest ring point is in the target
-      // direction). The stopCondition (h < tolerance && rayValid) will find
-      // the correct ring point.
-      if (lambda < 0) lambda = 0;
+      // When lambda < 0 the drone is inside the tracking circle.
+      // The NEGATIVE lambda flips dx/dy so the heuristic guides A*
+      // AWAY from target toward the circle — this is the original
+      // design for "too close → retreat" behavior.  Do NOT clamp.
       double dx = lambda * dp.x();
       double dy = lambda * dp.y();
       double dz = dp.z();
